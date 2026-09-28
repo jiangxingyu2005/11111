@@ -1,0 +1,18 @@
+{
+  "name": "qingxi-parent-document-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "postgres",
+    "database.password": "postgres",
+    "database.dbname": "postgres",
+    "database.server.name": "ems",
+    "table.include.list": "public.parent_document",
+    "plugin.name": "pgoutput",
+    "topic.prefix": "ems",
+    "slot.name": "ems_parent_document_slot",
+    "transforms": "unwrap",
+    "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState"
+  }
+}

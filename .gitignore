@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+uploads/
+output/
+.idea/
+.vscode/
+
+# 本地部署产物与测试数据(不入源码库)
+model/
+text/
+*.log
+ems_resp.json
+ems_html_resp.json
+parse_resp.json
+.claude/settings.local.json
