@@ -1,0 +1,139 @@
+# config/scalar_adapter.yaml
+# 字段映射层 + 冷启动分档策略 —— 解决"换一批真实数据，④ 路还成不成立"
+#
+# 核心原则：把预置物拆成【常量】与【变量】
+#   常量（不随数据集变，可硬编码预置）：波段表、单位换算、量纲合理区间、正则模板、模糊词表
+#   变量（随数据集变，必须探测后写入本文件）：字段是否存在、覆盖率、枚举取值集合、哨兵值、容差
+#
+# 使用流程（用户导入真实数据后必跑一次）：
+#   1) 跑 scripts/probe_scalar_coverage.py --csv <chunks导出> --emit-config
+#   2) 把生成的 field_map 与 tier_policy 回填到本文件
+#   3) 未通过门禁的字段一律不许进 expr（硬过滤）
+#
+version: 1.0
+depends: [config/structured_filter.yaml, config/query_parser.yaml]
+
+# ─────────────────────────────────────────────────────────────
+# 1. 字段映射：用户 schema → 框架标准字段
+#    左 = 用户的列名（可能是 freq / frequency / 载频 / RF_MHZ ...）
+#    右 = 框架标准字段（structured_filter.yaml 里的 scalar_fields）
+#    未映射的字段一律不参与 ④ 路，避免误匹配
+# ─────────────────────────────────────────────────────────────
+field_map:
+  rf:
+    candidates: [rf, rf_ghz, freq, frequency, 载频, 频率, RF, RF_MHZ, center_freq]
+    standard: [rf_min, rf_max]
+    unit_of_source: auto          # auto = 由 probe 依据值域推断；也可强制 GHz / MHz
+  pw:
+    candidates: [pw, pw_us, pulse_width, 脉宽, 脉冲宽度]
+    standard: [pw_min_us, pw_max_us]
+    unit_of_source: auto
+  prf:
+    candidates: [prf, prf_hz, pulse_repetition, 重频, 脉冲重复频率]
+    standard: [prf_min_hz, prf_max_hz]
+    unit_of_source: auto
+  doa:
+    candidates: [doa, doa_deg, azimuth, 方位, 方位角, 来波方向]
+    standard: [doa_min_deg, doa_max_deg]
+    unit_of_source: auto
+  toa:
+    candidates: [toa, timestamp, collect_time, 采集时间, 时间]
+    standard: [toa_start, toa_end]
+    unit_of_source: auto
+  snr:
+    candidates: [snr, snr_db, 信噪比]
+    standard: [snr_db]
+    unit_of_source: auto
+  modulation:
+    candidates: [modulation, mod_type, 调制, 调制方式, 调制类型]
+    standard: [modulation]
+    kind: enum
+  platform_type:
+    candidates: [platform_type, platform, 平台类型, 装备类型]
+    standard: [platform_type]
+    kind: enum
+
+  unmapped_policy: "未出现在 field_map 的用户列不参与 ④ 路，也不许进入 expr"
+
+# ─────────────────────────────────────────────────────────────
+# 2. 哨兵值识别（用户数据里"缺失"的写法千奇百怪）
+#    探测命中即视为 NULL —— 这是"未标注 ≠ 满足条件"能落地的前提
+# ─────────────────────────────────────────────────────────────
+null_sentinel_detection:
+  numeric: [-1, -999, -9999, 0, 999999, 65535]
+  string: ["", "null", "NULL", "None", "N/A", "NA", "未知", "unknown", "UNKNOWN", "-"]
+  rule: "出现在这些值中的一律计为 NULL，不计入覆盖率分子"
+  warn: "0 是否算缺失需按字段判断（snr=0 有意义，rf=0 无意义）——按字段单独配 zero_is_null"
+
+zero_is_null:
+  rf: true
+  pw: true
+  prf: true
+  doa: false          # 方位 0 度是合法值
+  snr: false          # 信噪比 0dB 是合法值
+  toa: true
+
+# ─────────────────────────────────────────────────────────────
+# 3. 冷启动分档策略（覆盖率驱动，不是拍脑袋）
+# ─────────────────────────────────────────────────────────────
+tier_policy:
+  thresholds:
+    tier2_hard:  0.80      # 覆盖率 ≥80% → 允许进入 expr 做硬过滤
+    tier1_soft:  0.30      # 30%~80% → 只允许软提权
+    # <30% → Tier 0，该字段 ④ 路完全关闭
+  per_field_override: {}   # probe 生成后回填，人工可微调，但下调阈值需留审计说明
+  global_kill_switch:
+    enabled: true
+    desc: "整库探测后若无任何字段达 Tier 2，④ 路硬过滤整体关闭，系统退化为纯向量 + RRF"
+    degraded_flag: "scalar_filter_unavailable_no_qualified_field"
+  enum_field_extra_rule:
+    desc: "枚举字段除覆盖率外，还要求取值集合可枚举且基数 ≤ 50"
+    max_cardinality: 50
+    on_exceed: "降为 Tier 1（只提权），不许做等值硬过滤"
+
+# ─────────────────────────────────────────────────────────────
+# 4. 单位推断规则（值域反推，防"MHz 当 GHz"）
+# ─────────────────────────────────────────────────────────────
+unit_inference:
+  rf:
+    - {range: [0.01, 300],   unit: GHz, note: 合理载频区间}
+    - {range: [300, 300000], unit: MHz, note: "均值 >300 → 八成存的是 MHz，入库需归一"}
+  pw:
+    - {range: [0.01, 10000], unit: us}
+    - {range: [10000, 1e9],  unit: ns}
+  prf:
+    - {range: [1, 2000000],  unit: Hz}
+    - {range: [2000000, 1e9], unit: mHz, note: 疑似存了毫赫，需确认}
+  on_mismatch: "推断单位与配置基准不一致 → 阻断该字段进入 Tier 2，并告警 unit_mismatch"
+
+# ─────────────────────────────────────────────────────────────
+# 5. 容差自适应（不再拍脑袋定 ±0.3GHz）
+# ─────────────────────────────────────────────────────────────
+tolerance_auto:
+  enabled: true
+  method: "按该字段值域分布推导：tolerance = max(配置基线, k × 相邻样本间隔中位数)"
+  k: 1.5
+  floor_by_field:
+    rf_ghz: 0.05
+    doa_deg: 1.0
+  note: "推导结果只写回 structured_filter.yaml 的 tolerance，仍需人工确认一次"
+
+# ─────────────────────────────────────────────────────────────
+# 6. 门禁（每次导入新数据集都必须重跑）
+# ─────────────────────────────────────────────────────────────
+gates:
+  - id: G-AD-01
+    desc: 新数据集必跑探测
+    assert: "每次批量导入后 probe 报告存在且非空，缺失则阻断 ④ 路启用"
+  - id: G-AD-02
+    desc: 未达标字段不得硬过滤
+    assert: "随机抽样 200 条 expr，含 Tier<2 字段的硬条件数 = 0"
+  - id: G-AD-03
+    desc: 单位一致性
+    assert: "unit_inference 与配置基准不一致的字段，Tier 必须 ≤ 1"
+  - id: G-AD-04
+    desc: 哨兵识别生效
+    assert: "哨兵值样本参与比较时不得被判为满足条件，抽检准确率 100%"
+  - id: G-AD-05
+    desc: 全字段不达标时全局关闭
+    assert: "无任何 Tier2 字段时，④ 路硬过滤关闭且 degraded 标记存在"

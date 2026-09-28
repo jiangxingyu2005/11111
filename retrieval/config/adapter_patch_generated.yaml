@@ -1,0 +1,52 @@
+# 由 probe_scalar_coverage.py 自动生成 —— 回填到 config/scalar_adapter.yaml
+# 生成后必须人工复核一次，尤其是 unit 与 tier 的人工下调
+tier_policy:
+  per_field_override:
+    rf:
+      tier: 1
+      coverage: 0.73
+      inferred_unit: MHz
+      note: "推断单位 MHz 与基准 GHz 不一致"
+    pw:
+      tier: 2
+      coverage: 0.8267
+      inferred_unit: us
+      note: "仅单值列，无法表达扫频/区间，建议改造为 min/max 双列"
+    prf:
+      tier: 1
+      coverage: 0.41
+      inferred_unit: Hz
+      note: "覆盖率 41%"
+    doa:
+      tier: 0
+      coverage: 0.1833
+      inferred_unit: deg
+      note: "覆盖率 18% 过低"
+    toa:
+      tier: 2
+      coverage: 0.8767
+      inferred_unit: ms
+      note: "仅单值列，无法表达扫频/区间，建议改造为 min/max 双列"
+    snr:
+      tier: 1
+      coverage: 0.76
+      inferred_unit: dB
+      note: "覆盖率 76%"
+    modulation:
+      tier: 2
+      coverage: 0.9
+      inferred_unit: "-"
+    platform_type:
+      tier: 0
+      coverage: 0.2933
+      inferred_unit: "-"
+      note: "覆盖率 29% 过低"
+field_map_detected:
+  rf: ['载频']
+  pw: ['脉宽']
+  prf: ['prf_hz']
+  doa: ['方位角']
+  toa: ['toa_start']
+  snr: ['snr_db']
+  modulation: ['modulation']
+  platform_type: ['platform_type']

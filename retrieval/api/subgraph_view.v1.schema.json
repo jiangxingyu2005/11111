@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.internal/em-retrieval/api/subgraph_view.v1.schema.json",
+  "title": "电磁信号检索分析系统 — 图谱接口契约 v1.0（独立界面，/api/graph/subgraph）",
+  "description": "图谱有独立界面，通过本接口单独取数，不与检索的文字/图片响应混合返回。请求参数与响应结构一并定义。设计要点：① 按 trace_id 绑定本次检索的 focus 实体（保证图谱页与结果一致），trace 过期后可回退为显式 entity_ids；② 独立超时与独立降级，图谱慢或挂掉不影响检索结果渲染；③ 权限必须在服务端重新校验，不因为「检索时已过滤」而放行；④ 交互操作（展开一跳、筛选关系类型、重新布局）复用本接口，不重跑检索。",
+  "type": "object",
+  "required": ["contract_version", "trace_id", "query", "nodes", "edges", "meta", "degraded"],
+  "additionalProperties": false,
+  "properties": {
+    "contract_version": { "type": "string", "const": "1.0" },
+    "trace_id": { "type": "string", "description": "与检索接口同一 trace_id；用于把图谱和本次结果绑定" },
+    "query": {
+      "type": "object",
+      "description": "本次请求参数的规范化回显（便于前端状态还原与排障）",
+      "required": ["mode"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["by_trace", "by_entities"],
+          "description": "by_trace=按 trace_id 取回本次检索的 focus（推荐）；by_entities=显式传实体（trace 过期/手动探索）"
+        },
+        "entity_ids": {
+          "type": ["array", "null"],
+          "items": { "type": "string" },
+          "description": "mode=by_entities 时必填"
+        },
+        "hops": { "type": "integer", "minimum": 1, "maximum": 2, "default": 1 },
+        "relation_types": {
+          "type": ["array", "null"],
+          "items": { "type": "string" },
+          "description": "按关系类型筛选（白名单见 config/relations.yaml），null=全部"
+        },
+        "direction": { "type": "string", "enum": ["both", "out", "in"], "default": "both" }
+      }
+    },
+    "focus_entities": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "本次作图的中心实体；mode=by_trace 时来自该次检索的重排 Top-5，不是 query 里的实体"
+    },
+    "nodes": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "required": ["id", "label", "type"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string" },
+          "label": { "type": "string" },
+          "type": { "type": "string", "description": "Platform / Emitter / Weapon / Sensor / Organization / Target / Event / IntelProduct / SignalSample" },
+          "is_focus": { "type": "boolean", "description": "true 时前端居中高亮" },
+          "hops_from_focus": { "type": "integer", "minimum": 0 },
+          "props": { "type": ["object", "null"], "additionalProperties": true },
+          "evidence": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "properties": {
+              "child_id": { "type": "string" },
+              "span": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 },
+              "parent_id": { "type": ["string", "null"], "description": "便于直接跳检索结果卡片" }
+            }
+          }
+        }
+      }
+    },
+    "edges": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "required": ["source", "target", "type", "evidence"],
+        "additionalProperties": false,
+        "properties": {
+          "source": { "type": "string" },
+          "target": { "type": "string" },
+          "type": { "type": "string", "description": "关系白名单（见 config/relations.yaml）：SOURCE_OF / COMPOSED_OF / MERGED_INTO / MODEL_MATCH / EQUIPPED_ON / BELONGS_TO / HAS_STATE / RELATED_TARGET / PLATFORM_CANDIDATE / PRODUCES / WRITTEN_INTO + SAME_BAND / CO_TIME / CO_LOCATE" },
+          "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+          "t_start": { "type": ["string", "null"], "description": "ISO 8601；D-10 SUPPORTS 时间锚" },
+          "t_end": { "type": ["string", "null"] },
+          "evidence": {
+            "type": "object",
+            "description": "G-API-02 要求每条边必须有 evidence；缺失的边不得渲染为可点击，且不得计入 RAGAS context。此处用 object（非 null）把该要求写成硬约束。",
+            "required": ["child_id", "span"],
+            "additionalProperties": false,
+            "properties": {
+              "child_id": { "type": "string" },
+              "span": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 },
+              "parent_id": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "paths": {
+      "type": ["array", "null"],
+      "items": { "type": "array", "items": { "type": "string" } },
+      "description": "高亮路径（focus → 关键邻居），用于报告的「知识关联路径」"
+    },
+    "communities": {
+      "type": ["array", "null"],
+      "description": "社区摘要只能作为「导航提示」，不得作为节点/边；无 span，不得计入 RAGAS context。",
+      "items": {
+        "type": "object",
+        "required": ["community_id", "summary"],
+        "additionalProperties": false,
+        "properties": {
+          "community_id": { "type": "string" },
+          "level": { "type": ["integer", "null"] },
+          "summary": { "type": "string" },
+          "generated_at": { "type": ["string", "null"] },
+          "dirty": { "type": "boolean", "description": "true 时前端必须标注「摘要可能过期」" }
+        }
+      }
+    },
+    "meta": {
+      "type": "object",
+      "required": ["hops", "pruned", "node_count", "edge_count"],
+      "additionalProperties": false,
+      "properties": {
+        "hops": { "type": "integer", "minimum": 1, "maximum": 2 },
+        "pruned": { "type": "boolean", "description": "true 时前端必须显示「已裁剪」提示" },
+        "node_count": { "type": "integer" },
+        "edge_count": { "type": "integer" },
+        "truncated_reason": { "type": ["string", "null"], "enum": ["node_limit", "edge_limit", "timeout", null] },
+        "source": { "type": ["string", "null"], "enum": ["neo4j", null] },
+        "layout_hint": { "type": ["string", "null"], "enum": ["force", "dagre", "concentric", null] },
+        "scope_filtered": { "type": "boolean", "description": "本次是否因权限过滤掉过节点/边（true 时前端可提示「部分内容不可见」）" }
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "description": "图谱接口自己的降级留痕（与检索接口的 degraded 分开统计，但都要进响应体）",
+      "items": {
+        "type": "object",
+        "required": ["code"],
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string",
+            "examples": ["subgraph_timeout", "subgraph_unavailable", "focus_entity_missing", "trace_expired_fallback_entities", "scope_filtered_all", "community_dirty"]
+          },
+          "message": { "type": ["string", "null"] },
+          "at": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "timings": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "neo4j_ms": { "type": "integer" },
+        "assemble_ms": { "type": "integer" },
+        "total_ms": { "type": "integer" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "by_entities 模式必须显式带实体列表",
+      "if": { "properties": { "query": { "properties": { "mode": { "const": "by_entities" } }, "required": ["mode"] } }, "required": ["query"] },
+      "then": { "properties": { "query": { "properties": { "entity_ids": { "type": "array", "minItems": 1 } }, "required": ["entity_ids"] } } }
+    },
+    {
+      "$comment": "G-API-05：裁剪时必须说明原因",
+      "if": { "properties": { "meta": { "properties": { "pruned": { "const": true } }, "required": ["pruned"] } }, "required": ["meta"] },
+      "then": { "properties": { "meta": { "properties": { "truncated_reason": { "type": "string" } }, "required": ["truncated_reason"] } } }
+    }
+  ]
+}

@@ -1,0 +1,218 @@
+"""POST /api/retrieval —— SSE 主端点（M-C1）。
+
+SSE 只是传输方式，契约对象 = 所有事件聚合后的一份响应（见 retrieval_response.v1.schema.json）：
+  {contract_version, trace_id, meta, results, assets, artifacts, graph_ref, degraded, timings}
+事件序列：meta -> progress* -> results -> assets -> token* -> done / error
+
+主链：QRY-02(L1+L3) -> ①③并行召回 -> 外层 RRF -> rerank -> QRY-06 父块回捞 -> 生成 -> done
+预算看门狗（QRY-07）在此真正驱动砍路：
+  >3.5s 砍重排 / >4.5s 砍图路 / >5.0s 砍稀疏与 NL2Query；每砍必留 degraded（禁静默降级）
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+
+from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+from ..config import effective_cfg, get_settings
+from ..degrade.codes import DegradedCode
+from ..degrade.orchestrator import BudgetWatchdog, DegradedCollector
+from ..fuse.parent_backfill import backfill, check_version
+from ..fuse.rerank import rerank
+from ..fuse.rrf import rrf_fuse
+from ..generate.report import stream_report
+from ..graph.expand import focus_entities
+from ..recall import bm25_route, community_route, graph_route, vector_route
+from ..trace.spans import TraceRecorder, bind_trace, new_trace_id
+from ..understand.query_parser import parse
+
+log = logging.getLogger("retrieval.api")
+router = APIRouter()
+CONTRACT_VERSION = "1.0"
+
+
+class RetrievalRequest(BaseModel):
+    query: str = Field(min_length=1)
+    scope: list[str] = Field(min_length=1)   # R4：必填无默认值（权限从第一行代码就是硬约束）
+    session_id: str | None = None            # QRY-00 会话（本期单轮直通）
+    eval_mode: bool = False                  # EV-1/EV-5：评测模式（不写缓存/不计被引）
+
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@router.post("/api/retrieval")
+async def retrieval(req: RetrievalRequest) -> StreamingResponse:
+    async def event_stream():
+        trace_id = new_trace_id()
+        collector = DegradedCollector()
+        tracer = TraceRecorder(trace_id, eval_mode=req.eval_mode)
+        watchdog = BudgetWatchdog()
+        t_start = time.monotonic()
+        timings: dict[str, int] = {}
+        first_token_at: float | None = None
+
+        yield _sse("meta", {"contract_version": CONTRACT_VERSION, "trace_id": trace_id,
+                            "eval_mode": req.eval_mode})
+        try:
+            # ── QRY-02 查询理解（L1 词典正则 + L3 校验器）──
+            span = tracer.start("understand")
+            pq = parse(req.query, collector)
+            span.hit_count = len(pq.conditions)
+            span.degraded_codes = collector.codes()
+            span.close()
+            timings["parse_ms"] = int(span.duration_ms)
+            yield _sse("progress", {"stage": "understand", "intent": pq.intent,
+                                    "conditions": [c.to_dict() for c in pq.conditions]})
+
+            # ── QRY-07 预算决策（砍路，不是砍语义）──
+            cfg = effective_cfg()
+            level = watchdog.current_level()
+            run_graph = get_settings().retrieval_graph_route_enabled
+            run_community = get_settings().retrieval_community_enabled
+            if level.value in ("L2", "L1", "L0"):        # >4.5s：先砍社区摘要，再砍图路保主链
+                if run_community:
+                    collector.record(DegradedCode.BUDGET_CUT_COMMUNITY,
+                                     f"budget level={level.value}, elapsed={watchdog.elapsed_s():.2f}s",
+                                     "graph")
+                    run_community = False
+                if run_graph:
+                    collector.record(DegradedCode.BUDGET_CUT_ROUTE3,
+                                     f"budget level={level.value}, elapsed={watchdog.elapsed_s():.2f}s",
+                                     "graph")
+                run_graph = False
+
+            # ── 三路并行召回（② 默认关；③-B 社区默认关）──
+            span = tracer.start("recall")
+            t0 = time.monotonic()
+            vec_hits, bm25_hits, graph_hits, community_hits = await asyncio.gather(
+                vector_route.recall(req.query, scope=req.scope, collector=collector,
+                                    conditions=pq.conditions),
+                bm25_route.recall(req.query, scope=req.scope, collector=collector),
+                graph_route.recall(req.query, scope=req.scope, collector=collector)
+                if run_graph else asyncio.sleep(0, result=[]),
+                community_route.recall(req.query, scope=req.scope, collector=collector)
+                if run_community else asyncio.sleep(0, result=[]),
+            )
+            timings["vector_ms"] = int((time.monotonic() - t0) * 1000)
+            span.hit_count = len(vec_hits) + len(bm25_hits) + len(graph_hits) + len(community_hits)
+            span.degraded_codes = collector.codes()
+            span.close()
+            yield _sse("progress", {"stage": "recall",
+                                    "vector": len(vec_hits), "bm25": len(bm25_hits),
+                                    "graph": len(graph_hits), "community": len(community_hits),
+                                    "budget_level": level.value})
+
+            # ── 外层 RRF（1 source 1 vote）──
+            span = tracer.start("fuse")
+            fused = rrf_fuse({"vector_hybrid": vec_hits, "bm25": bm25_hits,
+                              "graph_local": graph_hits, "graph_global": community_hits},
+                             k=int(cfg.get("fusion", {}).get("k", 60)),
+                             top_k=int(cfg.get("fusion", {}).get("top_k", 50)))
+            span.hit_count = len(fused)
+            span.close()
+
+            # ── Rerank（预算 L3 砍精排；超时/失败直出 RRF 序）──
+            span = tracer.start("rerank")
+            t0 = time.monotonic()
+            level = watchdog.current_level()
+            if level.value in ("L3", "L2", "L1", "L0"):   # >3.5s：砍重排
+                collector.record(DegradedCode.RERANK_SKIPPED,
+                                 f"budget level={level.value}", "rerank")
+                top = fused[:int(cfg.get("reranker", {}).get("top_k_out", 5))]
+            else:
+                top = await rerank(req.query, fused, collector)
+            timings["rerank_ms"] = int((time.monotonic() - t0) * 1000)
+            span.hit_count = len(top)
+            span.hit_parent_ids = [h.parent_id for h in top]
+            span.degraded_codes = collector.codes()
+            span.close()
+
+            # ── QRY-06 父块回捞（PG 熔断 -> 行内 content 兜底）──
+            span = tracer.start("backfill")
+            t0 = time.monotonic()
+            parents = await backfill(top, collector)
+            timings["pg_fetch_ms"] = int((time.monotonic() - t0) * 1000)
+            span.hit_count = len(parents)
+            span.close()
+
+            # ── results（证据锚点 child_id + span；IF-2 未就位则 span=null 并留痕）──
+            results = []
+            for i, h in enumerate(top, start=1):
+                p = parents.get(h.parent_id, {})
+                if p and not check_version(h, p):
+                    collector.record(DegradedCode.PARENT_FETCH_FAILED,
+                                     f"content_version drift: {h.child_id}", "pg_fetch")
+                sp = h.meta.get("span")
+                if not sp and not collector.has(DegradedCode.EVIDENCE_SPAN_MISSING):
+                    collector.record(DegradedCode.EVIDENCE_SPAN_MISSING,
+                                     "IF-2 未就位：子块无 span，前端不得渲染回原文高亮", "vector")
+                results.append({
+                    "parent_id": h.parent_id,
+                    "child_id": h.child_id,
+                    "title": h.meta.get("section") or None,
+                    "content": p.get("content") or h.content,
+                    "metadata": {"kb_id": h.meta.get("kb_id", ""),
+                                 "voted_by": h.meta.get("voted_by", []),
+                                 "rank": i,
+                                 "via_entity": h.meta.get("via_entity"),
+                                 "via_community": h.meta.get("via_community")},
+                    "evidence": {"child_id": h.child_id, "span": sp},
+                    "score": {"rrf": h.meta.get("rrf_score"),
+                              "rerank": h.meta.get("rerank_score")},
+                })
+            yield _sse("results", {"hits": results, "degraded": collector.as_list()})
+
+            # ── assets / artifacts（IF-5 未就位：空表，不算降级）──
+            yield _sse("assets", {"items": []})
+
+            # ── graph_ref：focus 取自重排 Top-N 命中实体（不取 query 里的实体）──
+            focus = focus_entities(top, top_n=int(cfg.get("graph_ref", {}).get("top_n", 5)))
+            bind_trace(trace_id, focus, req.scope, [h.child_id for h in top])
+            sg = cfg.get("subgraph", {})
+            graph_ref = {
+                "available": bool(focus),
+                "focus_entities": focus,
+                "endpoint": "/api/graph/subgraph",
+                "binding": "trace_id",
+                "default_hops": int(sg.get("default_hops", 1)),
+                "node_limit": int(sg.get("node_limit", 50)),
+                "edge_limit": int(sg.get("edge_limit", 100)),
+            }
+
+            # ── RPT 流式生成（LLM 熔断 -> 无 token，done 带降级）──
+            span = tracer.start("generate")
+            async for tok in stream_report(req.query, top, parents, collector):
+                if tok:
+                    if first_token_at is None:
+                        first_token_at = time.monotonic()
+                        timings["first_token_ms"] = int((first_token_at - t_start) * 1000)
+                    yield _sse("token", {"text": tok})
+            span.degraded_codes = collector.codes()
+            span.close()
+
+            timings["total_ms"] = int((time.monotonic() - t_start) * 1000)
+            yield _sse("done", {
+                "contract_version": CONTRACT_VERSION,
+                "trace_id": trace_id,
+                "meta": {"intent": pq.intent, "query_rewritten": None,
+                         "conditions": [c.to_dict() for c in pq.conditions]},
+                "graph_ref": graph_ref,
+                "degraded": collector.as_list(),
+                "timings": timings,
+                "budget_level": watchdog.current_level().value,
+            })
+        except Exception as e:  # 兜底：主链任何未捕获异常 -> error 事件，绝不裸 500
+            log.exception("retrieval pipeline failed: %s", e)
+            yield _sse("error", {"trace_id": trace_id, "message": str(e)[:300],
+                                 "degraded": collector.as_list()})
+        finally:
+            tracer.export_async()
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")

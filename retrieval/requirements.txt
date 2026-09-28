@@ -1,0 +1,21 @@
+# retrieval 服务依赖（阶段一：dense-only）
+fastapi>=0.110
+uvicorn[standard]>=0.29
+sse-starlette>=2.1
+pydantic>=2.6
+pydantic-settings>=2.2
+PyYAML>=6.0
+httpx>=0.27
+
+# 三库只读客户端（IF-9）
+pymilvus>=2.4
+neo4j>=5.19
+asyncpg>=0.29
+
+# query 向量化（阶段一与离线同模型：bge-large-zh-v1.5；阶段二切 BGE-M3 见 V3.0 §2）
+# FlagEmbedding 体积大，默认不装；RETRIEVAL_EMBED_MODE=remote 时走嵌入服务端点
+# FlagEmbedding>=1.2
+
+# 测试
+pytest>=8.0
+jsonschema>=4.21

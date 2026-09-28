@@ -1,0 +1,170 @@
+# config/structured_filter.yaml
+# 结构化标量过滤路（④ 路）配置 —— QRY-02 条件解析 + QRY-04 过滤/提权
+#
+# 定位：④ 不是独立召回路，是"约束路"。三出口：
+#   1) 硬条件  → Milvus expr（pre-filter，并入 ①② 路）
+#   2) 软条件  → 外层 RRF 之后 boost 提权
+#   3) 纯结构化 → PG SQL 独立通道（不进向量路）
+#
+# 排障指引：
+#   - 零召回      → 查 fallback.enabled 是否关闭；查 expr 是否过严（tau_hard 定太低）
+#   - 延迟升高    → 查 perf.post_filter_threshold（过滤率过高会退化暴力扫描）
+#   - 条件不生效  → 查 strength.tau_hard / enum_alias 是否覆盖该表述
+#   - 越权风险    → 查 scope.always_inject 必须为 true
+#
+version: 1.0
+
+# ─────────────────────────────────────────────────────────────
+# 1. Milvus 标量字段（离线由 META-02 写入，与 PG 事实源保持一致）
+#    索引类型依据 Milvus 2.4/2.5：
+#      INVERTED  → BOOL / INT / FLOAT / DOUBLE / VARCHAR / ARRAY，支持等值 + 范围（推荐，通用）
+#      STL_SORT  → BOOL + 数值，范围查询更快，但更新性能较差且不支持 mmap
+#      Trie      → VARCHAR 前缀匹配
+#      BITMAP    → 低基数字段等值（modulation / enabled / scope 标签）
+# ─────────────────────────────────────────────────────────────
+scalar_fields:
+  # —— 连续量：一律存 min/max 区间，禁止存单值或枚举（一个父块可能覆盖一段扫频）——
+  - {name: rf_min,      type: FLOAT,  unit: GHz,   index: INVERTED, null_sentinel: -1.0, desc: 载频下界}
+  - {name: rf_max,      type: FLOAT,  unit: GHz,   index: INVERTED, null_sentinel: -1.0, desc: 载频上界}
+  - {name: pw_min_us,   type: FLOAT,  unit: us,    index: INVERTED, null_sentinel: -1.0, desc: 脉宽下界}
+  - {name: pw_max_us,   type: FLOAT,  unit: us,    index: INVERTED, null_sentinel: -1.0, desc: 脉宽上界}
+  - {name: prf_min_hz,  type: FLOAT,  unit: Hz,    index: INVERTED, null_sentinel: -1.0, desc: 重频下界}
+  - {name: prf_max_hz,  type: FLOAT,  unit: Hz,    index: INVERTED, null_sentinel: -1.0, desc: 重频上界}
+  - {name: doa_min_deg, type: FLOAT,  unit: deg,   index: INVERTED, null_sentinel: -999.0, desc: 方位角下界}
+  - {name: doa_max_deg, type: FLOAT,  unit: deg,   index: INVERTED, null_sentinel: -999.0, desc: 方位角上界}
+  - {name: toa_start,   type: INT64,  unit: ms,    index: INVERTED, null_sentinel: 0,    desc: 采集时间窗起（Unix ms）}
+  - {name: toa_end,     type: INT64,  unit: ms,    index: INVERTED, null_sentinel: 0,    desc: 采集时间窗止}
+  - {name: snr_db,      type: FLOAT,  unit: dB,    index: INVERTED, null_sentinel: -999.0, desc: 信噪比}
+
+  # —— 枚举量：VARCHAR + 词表，NL2Query 输出必须先映射到枚举值 ——
+  - {name: modulation,    type: VARCHAR, index: INVERTED, enum: [LFM, NLFM, PSK, FSK, CW, UNKNOWN], desc: 调制类型}
+  - {name: platform_type, type: VARCHAR, index: INVERTED, enum: [radar, jammer, comms, ew, unknown], desc: 平台类型}
+  - {name: country,       type: VARCHAR, index: INVERTED, desc: 国别}
+
+  # —— 系统字段 ——
+  - {name: enabled,          type: BOOL,            index: INVERTED, desc: 内容隔离开关（SEG-02）}
+  - {name: scope,            type: ARRAY_VARCHAR,   index: INVERTED, desc: 权限标签，必须叠加进 expr}
+  - {name: content_version,  type: INT64,           index: INVERTED, desc: 版本（QRY-06 比对用）}
+  - {name: parent_id,        type: VARCHAR,         index: INVERTED, desc: 父块回捞键}
+  - {name: child_id,         type: VARCHAR,         index: INVERTED, desc: 证据锚点}
+
+# ─────────────────────────────────────────────────────────────
+# 2. 条件强度判定（QRY-02 输出 confidence → hard / soft）
+# ─────────────────────────────────────────────────────────────
+strength:
+  tau_hard: 0.85          # confidence ≥ 该值 且 表述含明确量值/枚举词 → hard
+  tau_soft: 0.50          # < 该值丢弃条件，不做任何过滤或提权
+  fuzzy_tokens:           # 命中即强制降级为 soft（模糊表述不许硬过滤）
+    - 高频段
+    - 低频段
+    - 近期
+    - 最近
+    - 大概
+    - 左右
+    - 附近
+    - 大约
+  rule: "confidence >= tau_hard AND NOT fuzzy → hard；tau_soft <= confidence < tau_hard OR fuzzy → soft"
+
+# ─────────────────────────────────────────────────────────────
+# 3. 数值容差（"9.5GHz 附近" → 区间 [9.2, 9.8]）
+# ─────────────────────────────────────────────────────────────
+tolerance:
+  rf_ghz:      {abs: 0.3,  note: "载频绝对容差 ±0.3GHz"}
+  doa_deg:     {abs: 5.0,  note: "方位角绝对容差 ±5°"}
+  pw_us:       {rel: 0.10, note: "脉宽相对容差 ±10%"}
+  prf_hz:      {rel: 0.05, note: "重频相对容差 ±5%"}
+  time_window: {auto: "自然语言时间归一为 [start_ts, end_ts]，月粒度取整月"}
+
+# ─────────────────────────────────────────────────────────────
+# 4. 枚举词表映射（NL2Query 只输出枚举值，不输出自由文本）
+# ─────────────────────────────────────────────────────────────
+enum_alias:
+  modulation:
+    - {match: [线性调频, 线性调频信号, chirp, LFM], value: LFM}
+    - {match: [非线性调频, NLFM], value: NLFM}
+    - {match: [相位编码, 相移键控, PSK], value: PSK}
+    - {match: [频率编码, 频移键控, FSK], value: FSK}
+    - {match: [连续波, 单频, CW], value: CW}
+  platform_type:
+    - {match: [雷达, radar], value: radar}
+    - {match: [干扰机, 干扰源, jammer], value: jammer}
+    - {match: [通信台, 通信站, comms], value: comms}
+
+# ─────────────────────────────────────────────────────────────
+# 5. 硬过滤（出口一）：Milvus expr
+# ─────────────────────────────────────────────────────────────
+hard_filter:
+  base_expr: "enabled == true"          # 基线：内容隔离开关永远叠加
+  scope:
+    always_inject: true                 # 权限维度必须叠加，禁止关闭（涉密红线）
+    template: "array_contains_any(scope, {scope_list})"
+  interval_rule: "文档区间 [rf_min,rf_max] 与查询区间 [q_min,q_max] 相交：rf_min <= q_max AND rf_max >= q_min"
+  null_policy: "缺失值一律剔除（未标注 ≠ 满足），哨兵参与比较即可自然排除"
+  max_conditions: 6                     # expr 条件数上限，超出只保留 confidence 最高的 N 条
+  fallback:
+    enabled: true                       # 【硬约束】过滤后空集 → 去掉硬条件重查一次
+    on_empty: "retry_without_hard"
+    degraded_flag: "scalar_hard_filter_dropped"   # 必须写入响应体 degraded[]
+  # pymilvus 2.4 参数名 expr=；2.5+ 改名为 filter=，按实际版本确认
+
+# ─────────────────────────────────────────────────────────────
+# 6. 软提权（出口二）：RRF 之后加分
+# ─────────────────────────────────────────────────────────────
+soft_boost:
+  enabled: true
+  formula: "score_final = rrf_score * (1 + Σ w_i * confidence_i * match_i)"
+  per_field_weight:
+    modulation: 0.12
+    rf: 0.10
+    doa: 0.08
+    toa: 0.08
+    platform_type: 0.06
+    country: 0.05
+  cap: 0.15                 # 提权总量上限，防止压倒语义相关性
+  note: "只提权不做剔除，保证零召回风险为 0"
+
+# ─────────────────────────────────────────────────────────────
+# 7. 纯结构化通道（出口三）：PG SQL
+# ─────────────────────────────────────────────────────────────
+pg_channel:
+  trigger_intent: STRUCTURED_ONLY       # "列出某时段全部 X 波段记录" 等无语义成分查询
+  skip_vector: true                     # 不进 Milvus、不进向量路、不进 RRF
+  index_hint: "toa 用 B-tree；modulation/country 用 GIN 或 B-tree；全文用 idx_parent_meta"
+  capabilities: [聚合, 排序, 分页, 导出]
+  note: "这是'检索'与'查询'的分界，两者不要混在同一条链路"
+
+# ─────────────────────────────────────────────────────────────
+# 8. 性能与降级
+# ─────────────────────────────────────────────────────────────
+perf:
+  post_filter_threshold: 0.02   # 过滤后候选/总行数 < 2% → 切 post-filter（避免退化暴力扫描）
+  expr_build_timeout_ms: 5
+  on_expr_error: "ignore_condition"     # expr 构造失败 → 丢弃该条件，不阻断检索
+
+degradation:
+  on_milvus_expr_unsupported: "忽略硬条件，走无过滤检索 + degraded 标记"
+  on_all_hard_conditions_dropped: "等同常规向量检索，能力不变"
+  never: "不得因标量过滤导致零召回或空响应"
+
+# ─────────────────────────────────────────────────────────────
+# 9. 验收断言（CI 化，M5）
+# ─────────────────────────────────────────────────────────────
+gates:
+  - id: G-SF-01
+    desc: 硬过滤空集回退
+    assert: "构造必然无交集的硬条件，回退后零召回率 = 0%"
+  - id: G-SF-02
+    desc: 权限维度不可绕过
+    assert: "所有 expr 均含 scope 条件；随机抽样 100 条 expr，缺失数 = 0"
+  - id: G-SF-03
+    desc: 提权不损害精度
+    assert: "开启 soft_boost 后 ContextPrecision 相对基线不下降"
+  - id: G-SF-04
+    desc: 回退率告警
+    assert: "生产埋点 fallback_rate ≤ 5%，超出说明 tau_hard 过松或条件解析过激"
+  - id: G-SF-05
+    desc: 区间语义正确
+    assert: "相交用例集（含边界相等、完全包含、完全分离）召回结果符合预期，准确率 100%"
+  - id: G-SF-06
+    desc: 纯结构化不进向量路
+    assert: "intent=STRUCTURED_ONLY 的请求，Milvus 调用次数 = 0"

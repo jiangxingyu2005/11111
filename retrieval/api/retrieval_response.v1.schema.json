@@ -1,0 +1,286 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.internal/em-retrieval/api/retrieval_response.v1.schema.json",
+  "title": "电磁信号检索分析系统 — 检索响应契约 v1.0（文字 + 图片，不含图谱）",
+  "description": "检索接口（/api/retrieval，SSE）只返回两类内容：results[]（文本，父块 Markdown + 证据锚点）与 assets[]（图片资产），另有 artifacts[]（本次在线分析中间产物，过程可视化、非证据）与 graph_ref（图谱页引用，不含图结构）。【图谱不在此接口返回】——图谱有独立界面，走独立接口 subgraph_view.v1.schema.json。传输方式为 SSE 分组事件（meta/progress/results/assets/token/done/error），本 schema 描述 done 事件之前的聚合快照，亦可用于非流式回放。",
+  "type": "object",
+  "required": ["contract_version", "trace_id", "meta", "results", "degraded"],
+  "additionalProperties": false,
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "前后端契约版本；破坏性变更必须升号，前端按版本做兼容分支"
+    },
+    "trace_id": {
+      "type": "string",
+      "description": "全链路追踪 ID。**同时是检索与图谱两个接口的绑定键**——图谱接口必须用它取回同一次检索的 focus 实体，避免图谱页显示与当前结果无关的图。"
+    },
+    "meta": {
+      "type": "object",
+      "required": ["intent"],
+      "additionalProperties": false,
+      "properties": {
+        "intent": {
+          "type": "string",
+          "enum": ["ENTITY_LEVEL", "GLOBAL", "HYBRID", "PURE_STRUCTURED", "FAQ_SHORTCUT"],
+          "description": "QRY-02 意图分类结果，决定 ③ 路走图遍历还是社区摘要"
+        },
+        "query_rewritten": {
+          "type": ["string", "null"],
+          "description": "改写后的检索 query（NL2Query 产物）"
+        },
+        "conditions": {
+          "type": "array",
+          "description": "NL2Query 抽出的结构化条件，用于前端条件回显与可撤销标签",
+          "items": {
+            "type": "object",
+            "required": ["field", "op", "confidence"],
+            "additionalProperties": false,
+            "properties": {
+              "field": { "type": "string", "description": "标准字段名，必须命中 query_parser.yaml 字段白名单" },
+              "op": { "type": "string", "enum": ["eq", "ne", "in", "gt", "gte", "lt", "lte", "between", "contains_any"] },
+              "value": { "type": ["number", "string", "boolean", "array", "null"] },
+              "unit": { "type": ["string", "null"], "description": "归一后单位（rf 基准为 GHz）" },
+              "raw": { "type": ["string", "null"], "description": "用户原话片段，L3 校验与人审回溯依据" },
+              "confidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "<0.6 的条件只允许软提权，禁止进硬过滤" }
+            }
+          }
+        },
+        "faq_shortcut": {
+          "type": ["object", "null"],
+          "description": "QRY-00F 命中时填充；命中则 results 可简化返回",
+          "additionalProperties": false,
+          "properties": {
+            "faq_id": { "type": "string" },
+            "match_type": { "type": "string", "enum": ["exact", "fuzzy", "semantic"] },
+            "score": { "type": "number" }
+          }
+        }
+      }
+    },
+    "results": {
+      "type": "array",
+      "description": "文本结果（QRY-06 父块回捞产物），按重排分数降序",
+      "items": {
+        "type": "object",
+        "required": ["parent_id", "child_id", "content", "evidence"],
+        "additionalProperties": false,
+        "properties": {
+          "parent_id": { "type": "string" },
+          "child_id": { "type": "string", "description": "证据锚点所在子块 ID" },
+          "title": { "type": ["string", "null"] },
+          "content": { "type": "string", "description": "父块 Markdown 全文（small-to-big）" },
+          "metadata": {
+            "type": ["object", "null"],
+            "description": "结构化元数据；缺字段一律 null，禁止 0 / -1 / \"未知\" 占位（META-03 红线）",
+            "additionalProperties": true
+          },
+          "evidence": {
+            "type": "object",
+            "required": ["child_id", "span"],
+            "additionalProperties": false,
+            "properties": {
+              "child_id": { "type": "string" },
+              "span": {
+                "type": ["array", "null"],
+                "items": { "type": "integer", "minimum": 0 },
+                "minItems": 2,
+                "maxItems": 2,
+                "description": "[start, end] 字符偏移；条款(8) 点击回原文高亮的唯一依据。null = IF-2 未就位（离线切分未产出 span），此时 degraded[] 必须同时出现 code=evidence_span_missing，且前端不得渲染「回原文高亮」。禁用 [0,0] 等假值占位——假锚点比没有锚点更危险。"
+              }
+            }
+          },
+          "score": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "properties": {
+              "rrf": { "type": "number" },
+              "rerank": { "type": "number" }
+            }
+          },
+          "entity_ids": {
+            "type": ["array", "null"],
+            "items": { "type": "string" },
+            "description": "该父块/子块关联的图谱实体 ID（由 META-02 三元绑定提供）。图谱页按 entity_ids 拉子图时使用；本接口不返回图结构。"
+          },
+          "trace": {
+            "type": ["array", "null"],
+            "description": "引用详情三级链（演示界面『检索详情 → 证据链 → 文档链』的机器化）。每步独立可点击；任一步数据缺失则该步置 null 并在 degraded 留痕，禁止整链静默省略。",
+            "items": {
+              "type": "object",
+              "required": ["stage", "label"],
+              "additionalProperties": false,
+              "properties": {
+                "stage": { "enum": ["retrieval", "evidence", "document"], "description": "retrieval=检索详情(命中参数+来源 Milvus/KG/文档)；evidence=证据链(实体/信号级检测值)；document=文档链(章节/条款级出处)" },
+                "label": { "type": "string", "description": "链节标题，如『信号 A01 检索子项』『频域分析手册 1.4.2 调制模式』" },
+                "detail": { "type": ["string", "null"], "description": "参数摘要，如『载频 5258MHz，脉宽 12.3μs，调制 FSK』；缺字段用 null 不占位" },
+                "sources": { "type": ["array", "null"], "items": { "type": "string" }, "description": "来源标签集合，如 [\"Milvus\",\"KG\",\"文档\"]" },
+                "link": {
+                  "type": ["object", "null"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "child_id": { "type": "string" },
+                    "span": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "minItems": 2, "maxItems": 2 },
+                    "entity_id": { "type": ["string", "null"] }
+                  },
+                  "description": "点击回溯目标：原文 span 或图谱实体；无 link 的链节前端渲染为不可点击"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "assets": {
+      "type": ["array", "null"],
+      "description": "父块内嵌图片资产；空数组表示该结果无图，不视为降级",
+      "items": {
+        "type": "object",
+        "required": ["asset_id", "parent_id", "storage_uri"],
+        "additionalProperties": false,
+        "properties": {
+          "asset_id": { "type": "string" },
+          "parent_id": { "type": "string" },
+          "child_id": { "type": ["string", "null"] },
+          "mime": { "type": ["string", "null"] },
+          "storage_uri": { "type": "string" },
+          "thumb_uri": { "type": ["string", "null"] },
+          "caption": { "type": ["string", "null"] },
+          "ocr_text": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "artifacts": {
+      "type": ["array", "null"],
+      "description": "本次检索的在线分析中间产物预览（演示界面『中间产物预览』三卡 rf_range / waveform / spectrum 的机器化）。与 assets[] 的区别：assets 是文档里本来就有的图片（离线入库产物，属于证据），artifacts 是本次检索现场计算生成的新资产（参数区间图 / 时域波形 / 频谱），**属于过程可视化，不是证据**——不得作为 RAGAS context，不得在报告中作为事实引用。生成失败留 null + degraded: artifact_failed，禁止返回占位图。",
+      "items": {
+        "type": "object",
+        "required": ["artifact_id", "kind", "preview_uri"],
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": { "type": "string" },
+          "kind": { "enum": ["rf_range", "waveform", "spectrum", "other"], "description": "rf_range=参数区间图（④路标量条件可视化）；waveform=时域波形；spectrum=频谱；other=其他中间产物" },
+          "title": { "type": ["string", "null"] },
+          "preview_uri": { "type": "string", "description": "缩略图 URI，用于卡片预览" },
+          "data_ref": { "type": ["string", "null"], "description": "生成该图的原始数据引用（TRACE 产物 ID），供『查看大图 / 复现』使用" },
+          "parent_id": { "type": ["string", "null"], "description": "关联的命中父块；查询级全局产物（如参数区间图）可为 null" }
+        }
+      }
+    },
+    "graph_ref": {
+      "type": ["object", "null"],
+      "description": "图谱引用（轻量，不含图结构）。前端据此判断「有没有图谱可看」以及「跳转图谱页时拿哪批实体看」。真正的节点与边由独立接口 /api/graph/subgraph 返回（见 subgraph_view.v1.schema.json）。",
+      "required": ["available", "focus_entities", "endpoint"],
+      "additionalProperties": false,
+      "properties": {
+        "available": {
+          "type": "boolean",
+          "description": "是否有子图可看。false 时必须同时出现 degraded[] 中 step=graph 的条目；true 时不得出现该条目。"
+        },
+        "focus_entities": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "取自重排 Top-5 结果关联的 entity_id，**不使用 query 中提及的实体**。为空数组时 available 必须为 false（无实体可作图的中心）。"
+        },
+        "endpoint": {
+          "type": "string",
+          "description": "图谱接口地址，如 /api/graph/subgraph"
+        },
+        "binding": {
+          "type": "string",
+          "enum": ["trace_id", "entity_ids"],
+          "description": "图谱页取数据的方式：trace_id=按本次检索绑定（推荐，保证与结果一致）；entity_ids=显式传实体列表（trace 过期后降级使用）"
+        },
+        "default_hops": { "type": "integer", "minimum": 1, "maximum": 2, "default": 1 },
+        "node_limit": { "type": "integer", "default": 50 },
+        "edge_limit": { "type": "integer", "default": 100 }
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "description": "降级留痕（红线一：禁止静默降级）。本次查询无降级时为空数组。注意：图谱能力在独立接口中还有自己的 degraded，两处都要留痕。",
+      "items": {
+        "type": "object",
+        "required": ["step", "code"],
+        "additionalProperties": false,
+        "properties": {
+          "step": { "type": "string", "enum": ["faq", "query_parse", "vector", "sparse", "graph", "scalar_filter", "rerank", "pg_fetch", "asset", "generate"] },
+          "code": {
+            "type": "string",
+            "examples": [
+              "subgraph_unavailable",
+              "no_focus_entity",
+              "scalar_filter_fallback",
+              "scalar_hard_condition_downgraded",
+              "scalar_filter_unavailable_no_qualified_field",
+              "rerank_skipped",
+              "graph_route_stripped",
+              "fallback_pg_fulltext",
+              "asset_ocr_missing"
+            ]
+          },
+          "message": { "type": ["string", "null"] },
+          "at": { "type": ["string", "null"], "description": "ISO 8601 时间戳" }
+        }
+      }
+    },
+    "timings": {
+      "type": ["object", "null"],
+      "description": "本接口不含 graph_ms——图谱耗时在独立接口中统计，避免与检索链路混算。",
+      "additionalProperties": false,
+      "properties": {
+        "parse_ms": { "type": "integer" },
+        "vector_ms": { "type": "integer" },
+        "sparse_ms": { "type": "integer" },
+        "scalar_ms": { "type": "integer" },
+        "rerank_ms": { "type": "integer" },
+        "pg_fetch_ms": { "type": "integer" },
+        "first_token_ms": { "type": "integer" },
+        "total_ms": { "type": "integer" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "G-API-01：available=false 必须伴随 degraded 中 step=graph 的条目",
+      "if": {
+        "properties": { "graph_ref": { "properties": { "available": { "const": false } }, "required": ["available"] } },
+        "required": ["graph_ref"]
+      },
+      "then": {
+        "properties": {
+          "degraded": {
+            "type": "array",
+            "contains": { "properties": { "step": { "const": "graph" } }, "required": ["step"] }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "G-API-01 反向：available=true 时不得出现 step=graph 的降级条目",
+      "if": {
+        "properties": { "graph_ref": { "properties": { "available": { "const": true } }, "required": ["available"] } },
+        "required": ["graph_ref"]
+      },
+      "then": {
+        "properties": {
+          "degraded": {
+            "type": "array",
+            "not": { "contains": { "properties": { "step": { "const": "graph" } }, "required": ["step"] } }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "G-API-07：graph_ref.available=true 时 focus_entities 不得为空（没有中心实体就没有可画的图）",
+      "if": {
+        "properties": { "graph_ref": { "properties": { "available": { "const": true } }, "required": ["available"] } },
+        "required": ["graph_ref"]
+      },
+      "then": {
+        "properties": { "graph_ref": { "properties": { "focus_entities": { "minItems": 1 } } } }
+      }
+    }
+  ]
+}

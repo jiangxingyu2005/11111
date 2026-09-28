@@ -1,0 +1,153 @@
+# ============================================================
+# 社区摘要路（③路 子路 B / Global Search）全量配置
+# 模块：GRAPH-03（构建）+ QRY-03（检索）
+# 状态：预置基线 —— 阈值与参数为初始推理值，M5 必须用真实语料重标
+# 依赖：Neo4j GDS(Leiden) / PG / Milvus / vLLM(Qwen2.5-72B)
+# ============================================================
+meta:
+  module: [GRAPH-03, QRY-03]
+  version: "1.0"
+  status: preset_baseline
+  # 红线：社区摘要是 LLM 生成的二次内容，无原文 span
+  # → 永远只作「导航上下文」，不得计入 RAGAS context，不得作为条款(8) 证据引用
+  redline: community_summary_is_navigation_not_evidence
+
+# ------------------------------------------------------------
+# 1. 构建侧：什么时候建社区
+# ------------------------------------------------------------
+build:
+  trigger:
+    full_first_build: true            # 首次全量导入完成后跑一次
+    incremental:
+      # 结构变化（边增删）才重跑 Leiden；仅属性变更不重跑社区
+      edge_delta_ratio: 0.05          # 受影响边数/总边数 ≥5% → 触发重跑社区检测
+      dirty_community_threshold: 20   # 或 dirty 社区数 ≥20 → 立即触发针对性命中重算
+      schedule: "0 3 * * *"           # 兜底：每日 03:00 批量重算 dirty 社区
+      attr_only_action: regenerate_summary_only   # 只重生成摘要，不重跑社区
+
+  leiden:
+    engine: neo4j-gds
+    algorithm: leiden
+    relationshipWeightProperty: confidence   # 边权取关系 confidence
+    maxLevels: 2                    # level 0（粗）/ level 1（细）；先两层，不贪多
+    gamma: 1.0                      # 分辨率：越大社区越小越细
+    tolerance: 0.01
+    randomSeed: 42                  # 固定种子，保证可复现（否则每次重算结果漂移）
+    min_community_size: 5           # <5 个实体不单独成社区（并入上级或丢弃）
+    exclude_isolated: true          # 度=0 孤立节点不入社区
+
+  # ★ 关键工程点：社区 ID 会随每次重算漂移
+  # 若用社区 ID 做引用键，重算一次所有引用全部失效
+  # → 必须用「成员集合指纹」作为稳定标识
+  fingerprint:
+    algo: sha1(sorted(member_entity_ids))
+    field: fingerprint
+    purpose: 引用键 / 向量绑定键；社区 ID 漂移不影响历史引用
+
+# ------------------------------------------------------------
+# 2. 摘要生成（离线，不占在线预算）
+# ------------------------------------------------------------
+summary:
+  model: Qwen2.5-72B                # 与 GRAPH-01 共用实例
+  strategy: map_reduce
+  map:
+    batch_by: entity_group          # 按「实体 + 其关联边」分批，不按字符切
+    max_entities_per_map: 30
+    max_tokens_out: 400
+  reduce:
+    max_tokens_out_level0: 600
+    max_tokens_out_level1: 400
+  output_schema: structured_claims  # 结构化，不用自由文本（自由文本必然被截断）
+  claims:
+    required_fields: [text, source_parent_ids]
+    drop_if_no_source: true         # ★ D-05 解法：无引用的论断直接丢弃
+    soft_fields: [child_ids, entity_ids, confidence]
+  no_truncation: true               # ★ D-05：超预算走「拆分为多条 claim」，禁止截断文本
+  input_assembly:
+    - entity_canonical_names        # 规范名（消歧后）
+    - entity_types
+    - edge_types_with_confidence
+    - evidence_child_ids            # 论断与原文的挂接基础
+
+# ------------------------------------------------------------
+# 3. 三处落库（同源，与 META-03 同原则）
+# ------------------------------------------------------------
+storage:
+  pg:
+    table: community_summary        # 记录系统 / 事实源
+    columns: [community_id, fingerprint, level, member_count, title,
+              summary_text, claims_json, generated_at, model, dirty, dirty_since]
+  neo4j:
+    node_label: Scene
+    props: [community_id, fingerprint, level, title, summary, dirty, generated_at]
+    rel: "(:Scene)-[:HAS_COMMUNITY]->(:Entity)"
+    note: 图谱页「社区摘要」只能作导航提示单独折叠，不得渲染为节点/边
+  milvus:
+    collection: community_scene
+    vector_field: embedding         # 向量化 title + summary_text（可选拼实体名）
+    scalar_fields: [community_id, fingerprint, level, member_count,
+                    generated_at, dirty, enabled, scope]
+    consistency_gate: G-CS-03
+
+# ------------------------------------------------------------
+# 4. 检索侧：怎么用（§3.1.1 子路 B 的展开）
+# ------------------------------------------------------------
+retrieval:
+  level_selection:
+    default: 1                      # 默认细粒度
+    macro_trend_query: 0            # 宏观趋势/汇总类（"各波段装备分布"）→ level 0
+    multi_level: allowed            # 允许 0+1 同时检索，但 RRF 内只计 1 票（见下）
+
+  scene_knn:
+    top_k: 8
+    threshold: 0.62                 # τ_s：独立阈值，★不得复用 τ_a(0.72)/τ_b(0.68)
+    filter: "enabled == true AND dirty == false"
+
+  # ★★ 本路最关键的一步：命中的社区摘要不能当证据，必须回捞到带 span 的子块
+  evidence_recovery:
+    method: representative_entities
+    top_n_entities: 5               # 取社区内「度数最高」或「与 query 语 nearest」的 top-N
+    then: fetch_child_chunks_by_entity   # 经 META-02 三元绑定回捞子块
+    require_span: true              # 每个命中社区至少回捞 1 个带 span 子块
+    on_fail: drop_hit               # 回捞不到 → 该社区命中作废（宁可少，不可无来源）
+    degraded_code: community_no_evidence
+
+  rrf:
+    weight: 1                       # 与其他路同权 1 票
+    multi_level_counts_as: 1        # 多层级检索不得重复计票（同双层 RRF 的理由）
+
+  llm_context_role: navigation_only # 摘要文本只进 prompt 背景区，且显式标注「生成内容，非证据」
+
+# ------------------------------------------------------------
+# 5. dirty 与新鲜度
+# ------------------------------------------------------------
+freshness:
+  dirty_mark_on: cdc_edit           # 编辑 → 相关实体所属社区 dirty=true
+  use_policy: soft_penalty          # dirty 仍可用：降权 + 报告标注「摘要更新时间」
+  hard_exclude_after_days: 7        # 超 7 天未重算 → 排除 + degraded=community_stale
+  report_requirement: 必须显示 generated_at（D-09 要求）
+
+# ------------------------------------------------------------
+# 6. 降级矩阵（每一条都对应「它挂了降到哪一层」）
+# ------------------------------------------------------------
+degrade:
+  scene_collection_missing:  { action: fallback_to_graph_traversal, code: community_unavailable }
+  no_entity_start:           { action: fallback_to_vector_only,     code: community_no_start }
+  llm_timeout:               { action: use_previous_mark_stale,     code: community_stale }
+  mapreduce_partial_fail:    { action: members_only_no_summary,     code: community_summary_partial }
+  evidence_recovery_empty:   { action: drop_hit,                    code: community_no_evidence }
+  budget_over_4_5s:          { action: cut_community_keep_traversal, code: budget_cut_community }
+  budget_over_3_5s:          { action: cut_whole_route3,            code: budget_cut_route3 }
+
+# ------------------------------------------------------------
+# 7. 验收门禁
+# ------------------------------------------------------------
+gates:
+  G-CS-01: 摘要每条 claim 至少 1 个 source_parent_id，引用覆盖率 100%
+  G-CS-02: 摘要 token ≤ 预算；超长走结构化拆分，全文无截断痕迹
+  G-CS-03: PG / Neo4j / Milvus 三处 fingerprint + member_count 一致
+  G-CS-04: RAGAS context 与最终报告正文中不含任何 Scene / 社区摘要内容
+  G-CS-05: 命中的每个社区至少回捞 1 个带 span 子块；无证据命中数 = 0
+  G-CS-06: 结构变化后 fingerprint 变化，旧 Scene 向量被替换且无残留
+  G-CS-07: 多层级（0+1）检索在 RRF 中计 1 票，不重复投票
+  G-CS-08: Scene KNN 检索 P95 ≤ 0.3s（摘要生成离线，不占在线预算）

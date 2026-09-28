@@ -1,0 +1,133 @@
+# config/scalar_extract.yaml
+# META-03 标量抽取与归一 —— 入库期旁路模块
+#
+# 定位：与 EMB-01 向量化并列，输入同一份【父块】文本，产出结构化标量，
+#       同时下推到 Milvus 子块标量列 + PG 事实表 + GRAPH-01 实体属性。
+#
+# 硬约束：
+#   1) 旁路可降级 —— 抽取失败绝不允许阻断向量入库（"可以降级，不能崩"）
+#   2) 不许编造 —— 抽不到就留 NULL，禁止用 0 / -1 占位（会被当真实值参与过滤）
+#   3) 一次抽取两处落库 —— Milvus 与图谱必须用同一份值，否则两边互相矛盾
+#   4) 单位先归一 —— 归一后的值才允许进 expr
+version: 1.0
+depends: [config/scalar_adapter.yaml, config/query_parser.yaml]
+
+# ─────────────────────────────────────────────────────────────
+# 1. 抽取粒度：父块抽、子块继承
+#    理由：频率属文档级/装备级属性，父块上下文完整；
+#          子块 512 字符可能正好把"工作频率"和数值截断在两边。
+# ─────────────────────────────────────────────────────────────
+granularity:
+  extract_at: parent        # parent | child
+  push_to: child            # 抽出后下推到该父块下所有子块行
+  consistency: "同一 parent_id 的所有子块共享同一组标量值，不允许逐子块不同"
+
+# ─────────────────────────────────────────────────────────────
+# 2. 三通道抽取（L1 正则 → L2 LLM → L3 校验器）
+# ─────────────────────────────────────────────────────────────
+channels:
+  l1_regex:
+    enabled: true
+    cost: 0
+    target_hit_rate: "固定写法覆盖 ≥60%"
+    patterns:
+      rf:
+        - '(?:工作)?频(?:率|段|带)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*[~\-–—到至]\s*(\d+(?:\.\d+)?)\s*(GHz|MHz|Hz|吉赫|兆赫|千赫)?'
+        - '(\d+(?:\.\d+)?)\s*[~\-–—到至]\s*(\d+(?:\.\d+)?)\s*(GHz|MHz)'
+      pw:
+        - '脉(?:冲)?宽(?:度)?\s*[:：]?\s*(\d+(?:\.\d+)?)\s*[~\-–—到至]?\s*(\d+(?:\.\d+)?)?\s*(us|µs|ns|微秒|纳秒)?'
+      prf:
+        - '重(?:复)?频(?:率)?\s*[:：]?\s*(\d+(?:\.\d+)?)\s*[~\-–—到至]?\s*(\d+(?:\.\d+)?)?\s*(kHz|Hz|千赫|赫兹)?'
+    on_no_hit: "转 L2"
+
+  l2_llm:
+    enabled: true
+    model: ""                       # 复用 GRAPH-01 的抽取模型，避免重复付费
+    share_call_with: GRAPH-01       # 与实体抽取共用一次调用
+    output_schema: json_strict      # 必须 JSON schema 约束，禁止自由文本
+    fields: [rf_min, rf_max, rf_unit_raw, pw_min_us, pw_max_us, prf_min_hz, prf_max_hz, modulation, platform_type]
+    on_no_hit: "留 NULL，转 L3 校验，不阻断"
+
+  l3_validator:
+    enabled: true
+    rules:
+      - id: V-dimension
+        desc: 量纲合理性（复用 scalar_adapter.unit_inference）
+        assert: "rf 归一后落在 [0.01, 300] GHz，越界即判抽取失败"
+      - id: V-order
+        desc: 区间方向
+        assert: "min <= max，否则判定失败并进人工复核队列"
+      - id: V-unit
+        desc: 单位一致性
+        assert: "有显式单位则以其为准；无单位则由值域推断；推断不出 → 留 NULL，禁止猜"
+      - id: V-band
+        desc: 波段交叉校验
+        assert: "归一后频率若落在规定波段表之外，标 warn 而非直接丢弃（可能是新装备）"
+    on_fail: "该字段留 NULL + extract_status=failed，绝不写入猜测值"
+
+# ─────────────────────────────────────────────────────────────
+# 3. 单位归一（最容易翻车的一步）
+# ─────────────────────────────────────────────────────────────
+normalize:
+  base_unit:
+    rf: GHz
+    prf: Hz
+    pw: us
+    doa: deg
+  keep_raw: true                  # 同时保留 *_unit_raw 与原始字符串，供人工复核
+  no_unit_infer: true             # 无单位时按值域推断（9200 → MHz → 9.2 GHz）
+  output: [rf_min, rf_max]        # 连续量必须存 min/max 双列，禁止单值列
+  forbid:
+    - "禁止只存中心频率（扫频/带宽信息会丢失）"
+    - "禁止存未归一的混合单位（9.2GHz 与 9200MHz 混存 → 过滤必然误杀）"
+
+# ─────────────────────────────────────────────────────────────
+# 4. 落库（一次抽取，三处写入，同一份值）
+# ─────────────────────────────────────────────────────────────
+persist:
+  pg_fact_table: scalar_extract     # 事实源：含原始串、置信度、版本、span
+  milvus_columns: child_chunk       # 下推到向量行（与 embedding 同行）
+  graph: GRAPH-01                   # 作为实体属性输入（与 Milvus 同源）
+  upsert_mode: full_row             # 硬约束：必须整行 upsert（partial 会清空向量与正文，见 D-08）
+  index: INVERTED                   # 标量列建 INVERTED 索引，否则 filter 慢扫
+  write_order: "PG 先写 → Milvus 后写 → 图谱最后；Milvus 失败进重试队列重放"
+
+# ─────────────────────────────────────────────────────────────
+# 5. 版本与可重跑
+# ─────────────────────────────────────────────────────────────
+versioning:
+  record: [extractor_version, prompt_version, schema_version, extracted_at, source_span]
+  rerun: "规则升级后按版本增量重跑；只更新标量列时仍须整行 upsert"
+  cache_key: "parent_content_hash + extractor_version"
+
+# ─────────────────────────────────────────────────────────────
+# 6. 降级策略（旁路不可崩）
+# ─────────────────────────────────────────────────────────────
+degrade:
+  blocking: false                 # 抽取失败不得阻断向量入库
+  on_failure: "标量留 NULL + extract_status=failed + 写 degraded 标记（前端可见）"
+  forbidden_placeholders: [0, -1, -999, "未知"]   # 占位值会被当真实值 → 静默误杀
+  timeout_budget_ms: 8000         # 单文档抽取预算，超时进重试队列
+  retry_queue: true               # 写链路不丢数据，恢复后重放
+  max_retry: 3
+  alert: "extract_failed_rate > 5% 触发一级告警"
+
+# ─────────────────────────────────────────────────────────────
+# 7. 验收门禁（新增，接 G-AD 系列）
+# ─────────────────────────────────────────────────────────────
+gates:
+  - id: G-SE-01
+    desc: 字段级抽取准确率
+    assert: "抽样 200 条人工核对，数值 + 单位联合准确率 ≥ 95%（数值对但单位错 = 错）"
+  - id: G-SE-02
+    desc: 零静默失败
+    assert: "每个抽取失败样本必有 extract_status 与 degraded 标记，静默失败数 = 0"
+  - id: G-SE-03
+    desc: 三处一致性
+    assert: "同一 parent_id 下 PG / Milvus / 图谱三处的标量值 100% 一致"
+  - id: G-SE-04
+    desc: 旁路不阻塞
+    assert: "人为令抽取模块失败，向量入库成功率不受影响（=100%）"
+  - id: G-SE-05
+    desc: 禁占位
+    assert: "标量列中不存在 0 / -1 / '未知' 等占位值；缺失一律为 NULL"

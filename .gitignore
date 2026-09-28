@@ -16,3 +16,6 @@ ems_resp.json
 ems_html_resp.json
 parse_resp.json
 .claude/settings.local.json
+
+# 生成的设计报告(不入库)
+framework_report.html
