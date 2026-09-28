@@ -70,6 +70,43 @@ curl -X POST http://127.0.0.1:8001/graph/documents/8f14e45f-.../enabled \
 
 不存在:`{"ok": false, "reason": "document not found"}`。
 
+## `GET /graph/documents/{doc_id}/blocks` — 文档父块查看
+
+给定文件 uuid,返回该文档全部父块(含正文,按章节号数值排序)+ 拼接后的清洗文档(标题行按 `level` 重写回正文)。
+
+**传入示例**:
+
+```bash
+curl http://127.0.0.1:8001/graph/documents/8f14e45f-.../blocks
+```
+
+**传出示例**:
+
+```json
+{
+  "doc_id": "8f14e45f-...", "filename": "ems_test.html", "block_count": 2,
+  "blocks": [
+    {"parent_id": "8f14e45f-..._1", "title": "对空搜索雷达", "level": 1, "chapter_no": "1",
+     "content": "工作频率 2.4GHz，调制方式 QPSK。", "enabled": true, "content_version": 1, "recall_count": 0},
+    {"parent_id": "8f14e45f-..._1.1", "title": "参数", "level": 2, "chapter_no": "1.1",
+     "content": "脉冲宽度 12us。", "enabled": true, "content_version": 1, "recall_count": 0}
+  ],
+  "content": "# 对空搜索雷达\n\n工作频率 2.4GHz，调制方式 QPSK。\n\n## 参数\n\n脉冲宽度 12us。"
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `doc_id` | 文档 uuid |
+| `filename` | 原文件名 |
+| `block_count` | 父块数量 |
+| `blocks` | 父块列表,按 `chapter_no` 数值排序(`1.10` 排在 `1.2` 后) |
+| `content` | 按序拼接后的完整 markdown |
+
+- 文档未入图谱(无父块):`blocks=[]`、`block_count=0`、`content=""`;无标题文档回退为单块 `title="无标题"`。
+- 拼接正文反映**图谱当前状态**(含分段编辑后内容),非原始 clean.md 字节。
+- 错误:`404` 文档不存在/已删除。
+
 ## `PUT /graph/segments/{parent_id}` — 分段编辑
 
 七步编辑:重切分 → 重嵌 → 增量重抽 → Neo4j 差量校正 → 回写 → CDC 留痕。

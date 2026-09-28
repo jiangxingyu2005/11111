@@ -28,7 +28,7 @@ qingxi 服务全部 HTTP 接口,按类别拆分到本目录各文件。Base URL 
 | 文档下载 | `/documents/{doc_id}/download` `/documents/{doc_id}/desensitize` | GET |
 | 抽取字典 | `/graph/dict` `/graph/dict/{dict_id}` | POST/GET/PUT/DELETE |
 | 在线查询与溯源 | `/graph/query` `/graph/trace/files` `/graph/trace/files/{doc_id}` `/graph/trace/files/{doc_id}/locate` | POST/GET |
-| 分段管理 | `/graph/segments` `/graph/segments/{parent_id}` `/graph/segments/{parent_id}/enabled` `/graph/documents/{doc_id}/enabled` | GET/POST/PUT |
+| 分段管理 | `/graph/segments` `/graph/segments/{parent_id}` `/graph/segments/{parent_id}/enabled` `/graph/documents/{doc_id}/enabled` `/graph/documents/{doc_id}/blocks` | GET/POST/PUT |
 | 路由与对账 | `/graph/route` `/graph/reconcile` | POST |
 | 图质量与消歧 | `/graph/metrics` `/graph/quality` `/graph/mesh/link-orphans` `/graph/resolve` | GET/POST |
 | IQ 检索库 | `/iq/ingest` `/iq/search` | POST |

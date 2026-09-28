@@ -15,6 +15,7 @@ from ..graphrag.milvus_client import AsyncMilvusClient
 from ..graphrag.neo4j_client import Neo4jClient
 from ..models import ParentDocument
 from ..utils.database import get_db
+from ..utils.document import get_document
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,26 @@ def _project(r: dict) -> dict:
         "content_version": r.get("content_version", 1),
         "recall_count": r.get("recall_count", 0),
     }
+
+
+def _chapter_key(chapter_no: str) -> tuple[int, ...]:
+    """章节号数值排序键:把 "1.10" 拆成 (1, 10),避免字符串排序把 1.10 排到 1.2 前。"""
+    parts: list[int] = []
+    for seg in (chapter_no or "").split("."):
+        parts.append(int(seg) if seg.isdigit() else 0)
+    return tuple(parts)
+
+
+def _reconstruct_markdown(blocks: list[dict]) -> str:
+    """把父块按「标题行 + 正文」拼回 markdown(chunk._split_sections 的逆操作)。"""
+    parts: list[str] = []
+    for b in blocks:
+        level = int(b.get("level") or 1)
+        title = str(b.get("title") or "").strip()
+        heading = f"{'#' * level} {title}"
+        body = str(b.get("content") or "").strip()
+        parts.append(f"{heading}\n\n{body}" if body else heading)
+    return "\n\n".join(parts)
 
 
 @router.get("/segments")
@@ -101,6 +122,38 @@ async def document_enabled(doc_id: str, body: EnabledRequest,
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
                             detail=f"文档级开关失败: {e}")
     return result
+
+
+@router.get("/documents/{doc_id}/blocks")
+async def document_blocks(doc_id: str, db: AsyncSession = Depends(get_db)) -> dict:
+    """按文档返回全部父块(含正文,按章节号排序)+ 拼接后的清洗文档。"""
+    doc = await get_document(db, doc_id)
+    if doc is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文档不存在")
+
+    rows = await gdb.select_where(db, ParentDocument, doc_id=doc_id)
+    rows.sort(key=lambda r: _chapter_key(r.get("chapter_no") or ""))
+
+    blocks = [
+        {
+            "parent_id": r["parent_id"],
+            "title": r.get("title", ""),
+            "level": r.get("level", 1),
+            "chapter_no": r.get("chapter_no", ""),
+            "content": r.get("content", ""),
+            "enabled": r.get("enabled", True),
+            "content_version": r.get("content_version", 1),
+            "recall_count": r.get("recall_count", 0),
+        }
+        for r in rows
+    ]
+    return {
+        "doc_id": doc_id,
+        "filename": doc.filename,
+        "block_count": len(blocks),
+        "blocks": blocks,
+        "content": _reconstruct_markdown(blocks),
+    }
 
 
 @router.put("/segments/{parent_id}")
