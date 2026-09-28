@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from .api import documents, graph, knowledge_bases, mesh, parse, seg
+from .api import documents, graph, iq, knowledge_bases, mesh, parse, seg
 from .config import settings
 from .utils.database import SessionLocal, init_db
 
@@ -48,10 +48,21 @@ async def _bootstrap_graphrag() -> None:
         logger.warning("Neo4j 约束初始化失败(不影响 parse 主链路): %s", e)
 
 
+async def _bootstrap_iq() -> None:
+    """IQ 检索库集合(ems_iq)初始化,独立于 GraphRAG;连不上不阻断启动。"""
+    try:
+        from .graphrag.milvus_client import AsyncMilvusClient
+
+        await AsyncMilvusClient().create_iq_collection()
+    except Exception as e:
+        logger.warning("IQ 检索库初始化失败(不影响启动): %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     await _bootstrap_graphrag()
+    await _bootstrap_iq()
     yield
 
 
@@ -63,3 +74,4 @@ app.include_router(documents.router)
 app.include_router(graph.router)
 app.include_router(seg.router)
 app.include_router(mesh.router)
+app.include_router(iq.router)

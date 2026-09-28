@@ -203,11 +203,12 @@ def process_iq_h5(content: bytes) -> dict:
     flat = _flatten_features(features, predicted_class, mod_id)
     md = describe_signal_features(flat)
 
-    # 9. 4 组 IQ 片段
+    # 9. 5 组 IQ 片段(新增 iq_norm:归一化后片段,供 IQ 嵌入用)
     iq_raw = _slice_iq(I, Q, segment_len)
     iq_clean = _slice_iq(I_work, Q_work, segment_len)
     iq_masked_segments = _slice_iq(iq_masked.real, iq_masked.imag, segment_len)
     iq_recovered_segments = _slice_iq(iq_recovered.real, iq_recovered.imag, segment_len)
+    iq_norm = _slice_iq(I_norm, Q_norm, segment_len)
 
     raw_entry = {
         "engine": "iq",
@@ -233,12 +234,15 @@ def process_iq_h5(content: bytes) -> dict:
         "iq_clean": iq_clean,
         "iq_masked": iq_masked_segments,
         "iq_recovered": iq_recovered_segments,
+        "iq_norm": iq_norm,
+        "flat": flat,
         "iq_meta": {
             "segment_len": segment_len,
             "iq_raw_segments": len(iq_raw),
             "iq_clean_segments": len(iq_clean),
             "iq_masked_segments": len(iq_masked_segments),
             "iq_recovered_segments": len(iq_recovered_segments),
+            "iq_norm_segments": len(iq_norm),
         },
         "md": md,
         "raw_entry": raw_entry,

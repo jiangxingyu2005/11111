@@ -22,6 +22,7 @@ xgboost
 scikit-learn
 h5py
 scipy
+onnxruntime  # IQ 嵌入(WavesFM 256 维,CPU 推理)
 # GraphRAG(ems_graphrag 融合):向量库 + 图库(openai 客户端在 llm.py/embeddings.py 里延迟导入,仅 openai provider 需要)
 pymilvus
 neo4j

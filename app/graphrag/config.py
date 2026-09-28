@@ -46,6 +46,8 @@ def build_settings() -> dict:
             "collection": settings.milvus_collection,
             "entity_collection": settings.graphrag_entity_collection,
             "dim": settings.milvus_dim,
+            "iq_collection": settings.iq_collection,
+            "iq_dim": settings.iq_dim,
         },
         "chunk": {
             "chunk_size": settings.graphrag_chunk_size,

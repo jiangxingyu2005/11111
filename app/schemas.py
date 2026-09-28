@@ -57,6 +57,32 @@ class IqParseResponse(BaseModel):
     results: list[IqResult]
 
 
+class IqIngestRequest(BaseModel):
+    """IQ 入库打标请求:文档 uuid + 人工类别标签(雷达型号/类型)。"""
+    doc_id: UUID
+    category: str
+
+
+class IqIngestResponse(BaseModel):
+    """IQ 入库结果:向量维度 + 图谱入库计数。"""
+    doc_id: str
+    category: str
+    vector_dim: int
+    graph: Optional[dict] = None
+
+
+class IqSearchRequest(BaseModel):
+    """IQ 判断类型请求:文档 uuid。"""
+    doc_id: UUID
+
+
+class IqSearchResponse(BaseModel):
+    """IQ 判断类型结果:类型 + 概率(向量库为空则 status=unknown)。"""
+    status: str
+    type: Optional[str] = None
+    probability: Optional[float] = None
+
+
 class MinerUHealth(BaseModel):
     ok: bool
     detail: Optional[str] = None

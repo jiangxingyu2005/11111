@@ -36,6 +36,36 @@ F_NAME_VECTOR = "name_vector"
 
 ENTITY_FIELD_NAMES = [F_ENTITY_ID, F_ENTITY_TYPE, F_ENTITY_NAME, F_NAME_VECTOR]
 
+# IQ 检索库 ems_iq 字段(独立于现有 graph 集合;256 维信号嵌入 + 26 特征标量 + 类别)
+IQ_ID = "iq_id"
+IQ_CATEGORY = "category"
+IQ_MODULATION = "modulation"
+IQ_MOD_ID = "mod_id"
+IQ_SNR = "snr"
+IQ_SAMPLE_RATE = "sample_rate_hz"
+IQ_SYMBOL_RATE = "symbol_rate"
+IQ_ATTENUATION_DB = "attenuation_db"
+IQ_EMBEDDING = "embedding"
+
+# 26 特征里的 24 个数值特征(与 iq._flatten_features 字段一一对应)
+IQ_FEATURE_FIELDS = [
+    "amplitude_mean", "amplitude_var", "phase_kurtosis", "phase_skewness",
+    "frequency_mean", "frequency_var", "frequency_median", "frequency_std",
+    "frequency_min", "frequency_max",
+    "psd_peak_frequency", "psd_peak_value", "spectral_centroid", "spectral_bandwidth",
+    "spectral_symmetry",
+    "max_alpha_energy", "dominant_alpha", "symbol_rate_section_peak",
+    "cumulant_c20", "cumulant_c21", "cumulant_c40", "cumulant_c42",
+    "cumulant_c60", "cumulant_c63",
+]
+
+# upsert 列顺序(主键 + 类别 + 调制 + 元数据标量 + 24 特征 + 向量)
+IQ_FIELD_NAMES = [
+    IQ_ID, IQ_CATEGORY, IQ_MODULATION, IQ_MOD_ID,
+    IQ_SNR, IQ_SAMPLE_RATE, IQ_SYMBOL_RATE, IQ_ATTENUATION_DB,
+    *IQ_FEATURE_FIELDS, IQ_EMBEDDING,
+]
+
 
 class MilvusClient:
     """pymilvus 包装(同步)。写入全部 upsert,重跑幂等。"""
@@ -56,6 +86,14 @@ class MilvusClient:
     @property
     def entity_collection_name(self) -> str:
         return self.settings["milvus"]["entity_collection"]
+
+    @property
+    def iq_collection_name(self) -> str:
+        return self.settings["milvus"].get("iq_collection", "ems_iq")
+
+    @property
+    def iq_dim(self) -> int:
+        return int(self.settings["milvus"].get("iq_dim", 256))
 
     def create_collection(self) -> None:
         from pymilvus import Collection, CollectionSchema, DataType, FieldSchema, utility
@@ -207,6 +245,68 @@ class MilvusClient:
             count += 1
         return count
 
+    # ---- IQ 检索库 ems_iq(256 维信号嵌入,独立于 graph 集合)----
+    def create_iq_collection(self) -> None:
+        from pymilvus import Collection, CollectionSchema, DataType, FieldSchema, utility
+        name = self.iq_collection_name
+        if utility.has_collection(name, using="default"):
+            return
+        dim = self.iq_dim
+        fields = [
+            FieldSchema(name=IQ_ID, dtype=DataType.VARCHAR, is_primary=True, max_length=64),
+            FieldSchema(name=IQ_CATEGORY, dtype=DataType.VARCHAR, max_length=256),
+            FieldSchema(name=IQ_MODULATION, dtype=DataType.VARCHAR, max_length=64),
+            FieldSchema(name=IQ_MOD_ID, dtype=DataType.INT64),
+            FieldSchema(name=IQ_SNR, dtype=DataType.FLOAT),
+            FieldSchema(name=IQ_SAMPLE_RATE, dtype=DataType.FLOAT),
+            FieldSchema(name=IQ_SYMBOL_RATE, dtype=DataType.FLOAT),
+            FieldSchema(name=IQ_ATTENUATION_DB, dtype=DataType.FLOAT),
+        ]
+        for fname in IQ_FEATURE_FIELDS:
+            fields.append(FieldSchema(name=fname, dtype=DataType.FLOAT))
+        fields.append(FieldSchema(name=IQ_EMBEDDING, dtype=DataType.FLOAT_VECTOR, dim=dim))
+        schema = CollectionSchema(fields, description="IQ 信号 256 维嵌入检索库(类别 + 26 特征标量)")
+        coll = Collection(name=name, schema=schema, using="default")
+        coll.create_index(IQ_EMBEDDING, {"metric_type": "COSINE", "index_type": "IVF_FLAT",
+                                         "params": {"nlist": 128}})
+
+    def upsert_iq(self, rows: list[dict]) -> None:
+        from pymilvus import Collection
+        coll = Collection(name=self.iq_collection_name, using="default")
+        data = [[r.get(f) for r in rows] for f in IQ_FIELD_NAMES]
+        coll.upsert(data)
+        coll.flush()  # pymilvus 3.x upsert 不自动 flush
+
+    def search_iq(self, vector: list, topk: int, expr: Optional[str] = None) -> list[dict]:
+        from pymilvus import Collection
+        coll = Collection(name=self.iq_collection_name, using="default")
+        coll.load()
+        params = {"metric_type": "COSINE", "params": {"nprobe": 16}}
+        output_fields = [f for f in IQ_FIELD_NAMES if f != IQ_EMBEDDING]
+        res = coll.search([vector], IQ_EMBEDDING, params, limit=topk, expr=expr,
+                          output_fields=output_fields)
+        out = []
+        for hit in res[0]:
+            row = dict(hit.fields)
+            row["_score"] = float(hit.distance)
+            out.append(row)
+        return out
+
+    def delete_iq(self, ids: list[str]) -> None:
+        if not ids:
+            return
+        from pymilvus import Collection
+        coll = Collection(name=self.iq_collection_name, using="default")
+        coll.load()
+        quoted = ", ".join(f"'{c}'" for c in ids)
+        coll.delete(expr=f"{IQ_ID} in [{quoted}]")
+        coll.flush()
+
+    def iq_count(self) -> int:
+        from pymilvus import Collection
+        coll = Collection(name=self.iq_collection_name, using="default")
+        return coll.num_entities
+
 
 class AsyncMilvusClient:
     """async 门面:pymilvus 同步调用经 asyncio.to_thread 委托(唯一同步孤岛)。"""
@@ -227,6 +327,10 @@ class AsyncMilvusClient:
     @property
     def entity_collection_name(self) -> str:
         return self._sync.entity_collection_name
+
+    @property
+    def iq_collection_name(self) -> str:
+        return self._sync.iq_collection_name
 
     async def create_collection(self) -> None:
         await self._ensure()
@@ -289,6 +393,27 @@ class AsyncMilvusClient:
     async def drop_collection(self, name: str) -> None:
         await self._ensure()
         await asyncio.to_thread(self._sync.drop_collection, name)
+
+    # ---- IQ 检索库门面 ----
+    async def create_iq_collection(self) -> None:
+        await self._ensure()
+        await asyncio.to_thread(self._sync.create_iq_collection)
+
+    async def upsert_iq(self, rows: list[dict]) -> None:
+        await self._ensure()
+        await asyncio.to_thread(self._sync.upsert_iq, rows)
+
+    async def search_iq(self, vector: list, topk: int, expr: Optional[str] = None) -> list[dict]:
+        await self._ensure()
+        return await asyncio.to_thread(self._sync.search_iq, vector, topk, expr)
+
+    async def delete_iq(self, ids: list[str]) -> None:
+        await self._ensure()
+        await asyncio.to_thread(self._sync.delete_iq, ids)
+
+    async def iq_count(self) -> int:
+        await self._ensure()
+        return await asyncio.to_thread(self._sync.iq_count)
 
 
 def get_milvus() -> MilvusClient:

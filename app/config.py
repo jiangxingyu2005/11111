@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     iq_label_map_path: str = "model/iq/label_map_15.json"
     iq_buquan_model_path: str = "model/iq/best.pth"
 
+    # IQ 嵌入(独立检索库 ems_iq;wavesfm_rml 重导出的 256 维 CLS 特征)
+    iq_embedding_model_path: str = "model/iq/wavesfm_embed.onnx"
+    iq_collection: str = "ems_iq"
+    iq_dim: int = 256
+
     # 清洗(页眉/页脚判定参数)
     clean_header_threshold: int = 3    # 短文本重复多少次判为页眉/页脚
     clean_header_max_len: int = 60     # 页眉/页脚候选文本的最大长度

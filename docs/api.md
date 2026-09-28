@@ -1,9 +1,10 @@
 # 接口文档
 
-本文档统一说明 qingxi 服务的全部 HTTP 接口,分两部分:
+本文档统一说明 qingxi 服务的全部 HTTP 接口,分三部分:
 
 - **清洗接口**(既有,本次融合**未改动其行为**)
 - **GraphRAG 接口**(新增,ems_graphrag 融合)
+- **IQ 检索库接口**(新增,IQ 信号相似度检索 + 入库打标)
 
 所有业务端点均为 `async def`。Base URL 默认 `http://127.0.0.1:8001`(端口以实际启动为准)。
 
@@ -678,3 +679,105 @@ curl -X POST http://127.0.0.1:8001/graph/resolve
 - 实体类型:改 `description`/`json_schema` 讲清每类含义(已随 `load_entity_defs` 进 LLM prompt)。
 - 关系:改 `description`/`trigger_words` 讲清每类关系语义与触发词(已随 `load_relations` 进 LLM prompt)。
 - 改后即时生效(抽取侧每次现查),无需改代码、无需重启。
+
+---
+
+## 13. IQ 信号专属检索库(新增)
+
+IQ/H5 除「信号解析 → 26 特征中文描述入库」(`/parse-iq`,§1.6)外,另建一条**独立于现有知识库/图谱的 IQ 检索库** `ems_iq`(256 维),专做 IQ 信号相似度检索与人工打标。两条接口:
+
+- `POST /iq/ingest`(入库打标):传文档 uuid + 类别 → IQ 向量 + 标量写入 `ems_iq`,并把清洗后 md 追加类别后正常入知识库/知识图谱。
+- `POST /iq/search`(判断类型):传文档 uuid → 向量化 → 最近邻,返回「类型 + 概率」;向量库为空返回「未知」。
+
+场景:先检索判断信号是哪种雷达型号(返回类型 + 概率);概率低时人工打标签(类别),再入库固化。
+
+### 13.1 数据模型
+
+`ems_iq`(Milvus,独立于 `ems_chunks`/`ems_entities`,也不进 `knowledge_bases` 表):
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `iq_id` | VARCHAR(PK) | 文档 uuid 字符串 |
+| `category` | VARCHAR(256) | 人工类别标签(雷达型号/类型,自由文本) |
+| `modulation` / `mod_id` | VARCHAR(64) / INT64 | 调制方式预测 |
+| `snr` / `sample_rate_hz` / `symbol_rate` / `attenuation_db` | FLOAT | 信号标量 |
+| 24 个特征 | FLOAT | 26 特征里的数值子集(幅度/相位/频率/PSD/谱/累积量等) |
+| `embedding` | FLOAT_VECTOR(256) | WavesFM 256 维 CLS 特征(L2 归一化,COSINE/IVF_FLAT) |
+
+### 13.2 入库打标 `POST /iq/ingest`
+
+`POST /iq/ingest`(application/json)
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `doc_id` | UUID | 是 | 文档 uuid(须先经 `/parse-iq` 登记) |
+| `category` | string | 是 | 人工类别标签(雷达型号/类型);空串 → 422 |
+
+```bash
+curl -X POST http://127.0.0.1:8001/iq/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"doc_id": "8f14e45f-...", "category": "某型对空搜索雷达"}'
+```
+
+流程:取回原始 H5 → 重跑 IQ 管道(归一化片段 + 26 特征/md)→ 文档级 256 维向量(片段 mean-pool)→ `upsert` 进 `ems_iq`(含 category + 标量子集)→ 若 `GRAPHRAG_ENABLED=true`,`md + f"\n\n类别:{category}"` 走 `ingest_document` 入知识库/知识图谱并 `mark_document_in_kb`(与普通文本一致)。
+
+响应 `IqIngestResponse`:
+
+```json
+{"doc_id": "8f14e45f-...", "category": "某型对空搜索雷达", "vector_dim": 256, "graph": {"...": "..."}}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `doc_id` | 文档 uuid |
+| `category` | 打标类别 |
+| `vector_dim` | 向量维度(256) |
+| `graph` | 图谱入库计数摘要(`GRAPHRAG_ENABLED=false` 或图谱入库失败时为 `null`) |
+
+错误:`404` 文档不存在 / 源 H5 取回失败;`422` `category` 为空。
+
+### 13.3 判断类型 `POST /iq/search`
+
+`POST /iq/search`(application/json)
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `doc_id` | UUID | 是 | 文档 uuid |
+
+```bash
+curl -X POST http://127.0.0.1:8001/iq/search \
+  -H "Content-Type: application/json" \
+  -d '{"doc_id": "8f14e45f-..."}'
+```
+
+流程:取回 H5 → 向量化 → `ems_iq` 最近邻(`topk=3`,排除自身 `iq_id != doc_id`)→ 取最近邻的 `category` 作类型、余弦相似度作概率。
+
+命中响应 `IqSearchResponse`:
+
+```json
+{"status": "ok", "type": "某型对空搜索雷达", "probability": 0.92}
+```
+
+空库 / 无邻居响应:
+
+```json
+{"status": "unknown", "type": "未知", "probability": null}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `status` | `ok`(命中)/ `unknown`(向量库为空或无邻居) |
+| `type` | 最近邻已打标信号的类别(=`category` 人工标签) |
+| `probability` | 最近邻余弦相似度(0~1);概率低 = 置信度低,可转人工打标签 |
+
+错误:`404` 文档不存在 / 源 H5 取回失败。
+
+### 13.4 配置(全部在 `.env`)
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `IQ_EMBEDDING_MODEL_PATH` | `model/iq/wavesfm_embed.onnx` | WavesFM 256 维嵌入模型(从 dc `wavesfm_rml` 重导出,暴露 CLS 特征) |
+| `IQ_COLLECTION` | `ems_iq` | IQ 检索库集合名(独立于 `ems_chunks`/`ems_entities`) |
+| `IQ_DIM` | `256` | IQ 嵌入维度 |
+
+> IQ 检索库集合 `ems_iq` 在服务启动时随 `lifespan` 自动创建(独立于 `GRAPHRAG_ENABLED`),连不上 Milvus 不阻断启动,仅告警。
