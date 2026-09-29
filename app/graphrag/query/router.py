@@ -14,7 +14,7 @@ from typing import Callable, Optional
 from ..config import get
 from ..embeddings import EmbeddingClient
 from ..llm import LLMClient
-from ..milvus_client import F_ENABLED, F_KB_ID, F_KG_ENTITY_IDS, AsyncMilvusClient
+from ..milvus_client import F_ENABLED, F_KG_ENTITY_IDS, AsyncMilvusClient
 from ..neo4j_client import Neo4jClient
 from .answer import generate_answer
 from .expand import expand

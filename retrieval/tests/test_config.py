@@ -1,7 +1,5 @@
 """配置纪律测试：防"配了没生效 / 缺变量静默启动 / 后端通道串味"。"""
-import importlib
 import os
-import subprocess
 import sys
 from pathlib import Path
 

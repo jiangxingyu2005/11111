@@ -7,9 +7,12 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
+from .api.eval import router as eval_router
 from .api.graph import router as graph_router
 from .api.retrieval import router as retrieval_router
 from .config import get_settings
@@ -20,6 +23,7 @@ logging.basicConfig(level=logging.INFO,
 app = FastAPI(title="retrieval", version="3.1.0")
 app.include_router(retrieval_router)
 app.include_router(graph_router)
+app.include_router(eval_router)
 
 
 def _warm_ollama(s) -> None:
@@ -162,3 +166,9 @@ def _startup() -> None:
 @app.get("/healthz")
 def healthz() -> dict:
     return {"status": "ok", "service": "retrieval", "version": "3.1.0"}
+
+
+# 前端单页（在线检索 + 测评）。挂载必须放在所有路由之后，Mount("/") 按前缀匹配
+# 会拦截其后注册的路由，故置于文件末尾作为兜底；浏览器开 http://127.0.0.1:8100/ 即见页面。
+app.mount("/", StaticFiles(directory=str(Path(__file__).parent / "static"), html=True),
+          name="static")

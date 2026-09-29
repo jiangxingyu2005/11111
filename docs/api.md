@@ -1,10 +1,11 @@
 # 接口文档
 
-本文档统一说明 qingxi 服务的全部 HTTP 接口,分三部分:
+本文档统一说明 qingxi 服务的全部 HTTP 接口,分四部分:
 
 - **清洗接口**(既有,本次融合**未改动其行为**)
 - **GraphRAG 接口**(新增,ems_graphrag 融合)
 - **IQ 检索库接口**(新增,IQ 信号相似度检索 + 入库打标)
+- **预设推理规则接口**(新增,需求(7)/(8) 规则表 CRUD)
 
 所有业务端点均为 `async def`。Base URL 默认 `http://192.168.31.15:8001`(端口以实际启动为准)。
 
@@ -809,3 +810,32 @@ curl -X POST http://192.168.31.15:8001/iq/search \
 | `IQ_DIM` | `256` | IQ 嵌入维度 |
 
 > IQ 检索库集合 `ems_iq` 在服务启动时随 `lifespan` 自动创建(独立于 `GRAPHRAG_ENABLED`),连不上 Milvus 不阻断启动,仅告警。
+
+---
+
+## 14. 预设推理规则(新增)
+
+> 对应需求 (7)「触发预设推理规则」与 (8)「规则触发详情」。规则是用户自定义的「条件 → 动作」评判项:
+> 检索完成后由**确定性规则引擎**求值(先算后写),命中规则作为结构化事实注入 LLM 流式提示词。
+> 规则表 CRUD 由 qingxi 侧 `rules` 模型 + `/rules` 接口暴露;检索侧(retrieval 服务)每次检索现查 `rules` 表求值。
+
+| 端点 | 方法 | 说明 |
+|---|---|---|
+| `/rules` | POST | 新建规则(语义主键 `id` 如 `R_001`,重复 → 409) |
+| `/rules` | GET | 列表(未删除,按 `priority` 降序) |
+| `/rules/{rule_id}` | GET | 单个(不存在/已删除 → 404) |
+| `/rules/{rule_id}` | PUT | 更新(仅传要改字段) |
+| `/rules/{rule_id}` | DELETE | 逻辑删除(置 `deleted_at`) |
+
+字段:主键 `id`(String(50),语义 `R_XXX`)/ `name` / `description` / `condition`(JSONB 谓词)
+/ `action`(JSONB 动作)/ `priority`(int,越大越靠前)/ `enabled` / `kb_id`(UUID,空 = 全局)
+/ `deleted_at` / `created_at` / `updated_at`。
+
+**条件 DSL**(`condition`):`{"all":[子句], "any":[子句]}`,`all`=AND、`any`=OR;子句 `{field, op, value}`。
+可用 `field`:`kg_confidence`(入库置信度表)/ `rerank_score` / `rrf_score` / `kb_id` / `section` / `content`;
+可用 `op`:数值 `lt/lte/gt/gte/eq/ne`,字符串 `eq/ne/contains`。空条件与取不到值的子句一律**不触发**(fail-closed)。
+
+**动作 DSL**(`action`):`{"type":"mark","label":"疑似优先","severity":"high","hint":"建议优先核查"}`,
+只做标记,不改召回序/不过滤/不提权。
+
+详细字段表、示例与检索侧衔接说明见 [api/10-rules.md](api/10-rules.md)。

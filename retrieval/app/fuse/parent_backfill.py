@@ -41,7 +41,7 @@ async def backfill(hits: list[Hit], collector: DegradedCollector) -> dict[str, d
         try:
             rows = await conn.fetch(
                 """
-                SELECT parent_id, content, content_version, summary, keywords
+                SELECT parent_id, content, content_version, summary, keywords, kg_confidence
                 FROM parent_document WHERE parent_id = ANY($1::text[])
                 """,
                 parent_ids,
@@ -54,6 +54,7 @@ async def backfill(hits: list[Hit], collector: DegradedCollector) -> dict[str, d
                 "content_version": r["content_version"],
                 "summary": r["summary"],
                 "keywords": r["keywords"],
+                "kg_confidence": r["kg_confidence"],
             }
             for r in rows
         }

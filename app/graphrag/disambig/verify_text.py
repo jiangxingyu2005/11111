@@ -28,7 +28,6 @@ except Exception:
 from sqlalchemy import delete
 
 from ...models import EntityRegistryEntry
-from .. import db as gdb
 from .. import resolve
 from ..ids import canonical_entity_id
 from ..milvus_client import AsyncMilvusClient

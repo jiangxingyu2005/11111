@@ -29,19 +29,56 @@ SYSTEM = (
 )
 
 
-def build_prompt(query: str, hits: list[Hit], parents: dict[str, dict]) -> list[dict]:
-    """组装 messages：父块全文进 context，子块给编号 [n]。"""
+def build_prompt(
+    query: str,
+    hits: list[Hit],
+    parents: dict[str, dict],
+    rule_hits: list[dict] | None = None,
+) -> list[dict]:
+    """组装 messages：父块全文进 context，子块给编号 [n]；附置信度 + 规则触发情况。
+
+    置信度（需求(8)「置信度评分」）：每条证据行尾标 kg_confidence / rerank / rrf，
+    三者语义不同（实体抽取置信 / 检索匹配度 / 融合票分），不混算，只并列供参考。
+    规则触发（需求(7)/(8)「规则触发详情」）：rule_hits 由确定性规则引擎算好注入，
+    LLM 只转述，不得自行判定规则是否命中。
+    """
     lines = []
     for i, h in enumerate(hits, start=1):
         p = parents.get(h.parent_id, {})
         ctx = p.get("content") or h.content
-        lines.append(f"[{i}] 来源 kb={h.meta.get('kb_id','')} child_id={h.child_id}\n{ctx}")
+        conf = []
+        kg = p.get("kg_confidence")
+        if kg is not None:
+            conf.append(f"kg_confidence={kg:.3f}")
+        if h.meta.get("rerank_score") is not None:
+            conf.append(f"rerank={h.meta.get('rerank_score'):.3f}")
+        if h.meta.get("rrf_score") is not None:
+            conf.append(f"rrf={h.meta.get('rrf_score'):.4f}")
+        conf_s = f"（置信度：{'，'.join(conf)}）" if conf else ""
+        lines.append(f"[{i}] 来源 kb={h.meta.get('kb_id','')} child_id={h.child_id}{conf_s}\n{ctx}")
     evidence = "\n\n".join(lines) if lines else "（无命中证据）"
+
+    rule_block = ""
+    if rule_hits:
+        rule_lines = []
+        for r in rule_hits:
+            hint = f"；{r['hint']}" if r.get("hint") else ""
+            rule_lines.append(
+                f"- 【{r['label']}】规则「{r['name']}」（{r['rule_id']}，severity={r['severity']}）"
+                f"已触发，{r['reason']}{hint}"
+            )
+        rule_block = "预设规则触发情况：\n" + "\n".join(rule_lines)
+
     user = (
         f"用户问题：{query}\n\n"
         f"证据（共 {len(hits)} 条，编号 [1]~[{len(hits)}]）：\n{evidence}\n\n"
+    )
+    if rule_block:
+        user += f"{rule_block}\n\n"
+    user += (
         "请按四要素输出：1) 相似信号列表（带 [n]）2) 关联路径 3) 规则触发详情 "
-        "4) 置信度与依据不足说明。结论必须由证据支撑。"
+        "4) 置信度与依据不足说明。结论必须由证据支撑；"
+        "规则触发情况与置信度仅供参考，仍须以证据为准，禁止编造参数值。"
     )
     return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
 
@@ -51,6 +88,7 @@ async def stream_report(
     hits: list[Hit],
     parents: dict[str, dict],
     collector: DegradedCollector,
+    rule_hits: list[dict] | None = None,
 ) -> AsyncIterator[str]:
     """yield 报告 token（真实流式）；任何失败 -> 记录降级后静默结束（不出正文）。"""
     s = get_settings()
@@ -59,7 +97,7 @@ async def stream_report(
                          "LLM endpoint not configured", "generate")
         return
 
-    messages = build_prompt(query, hits, parents)
+    messages = build_prompt(query, hits, parents, rule_hits)
     url = s.graphrag_llm_base_url.rstrip("/") + "/chat/completions"
     try:
         from ..store.fake import guard

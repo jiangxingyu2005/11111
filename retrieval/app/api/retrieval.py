@@ -25,6 +25,7 @@ from ..degrade.orchestrator import BudgetWatchdog, DegradedCollector
 from ..fuse.parent_backfill import backfill, check_version
 from ..fuse.rerank import rerank
 from ..fuse.rrf import rrf_fuse
+from ..fuse.rules import evaluate_rules, load_rules
 from ..generate.report import stream_report
 from ..graph.expand import focus_entities
 from ..recall import bm25_route, community_route, graph_route, vector_route
@@ -157,6 +158,14 @@ async def retrieval(req: RetrievalRequest) -> StreamingResponse:
             span.hit_count = len(parents)
             span.close()
 
+            # ── 规则求值（需求(7)预设推理规则）：先算后写，只标记不改召回序 ──
+            # 规则现查 rules 表（增删改即时生效）；fake 后端无 PG，规则为空（无规则 = 稳态）。
+            span = tracer.start("rules")
+            rules = await load_rules(collector)
+            rule_hits = evaluate_rules(rules, top, parents, req.scope)
+            span.hit_count = len(rule_hits)
+            span.close()
+
             # ── 合并 L2 结果（生成前；按 L2 自身起跑时间算预算，不被生成时长吃掉）──
             if l2_task is not None:
                 budget_ms = int(cfg.get("timeout", {}).get("nl2query_ms", 20000))
@@ -203,6 +212,9 @@ async def retrieval(req: RetrievalRequest) -> StreamingResponse:
                 })
             yield _sse("results", {"hits": results, "degraded": collector.as_list()})
 
+            # ── rules：规则触发详情（需求(8)；空 = 无规则命中，不算降级）──
+            yield _sse("rules", {"hits": rule_hits})
+
             # ── assets / artifacts（IF-5 未就位：空表，不算降级）──
             yield _sse("assets", {"items": []})
 
@@ -222,7 +234,7 @@ async def retrieval(req: RetrievalRequest) -> StreamingResponse:
 
             # ── RPT 流式生成（LLM 熔断 -> 无 token，done 带降级）──
             span = tracer.start("generate")
-            async for tok in stream_report(req.query, top, parents, collector):
+            async for tok in stream_report(req.query, top, parents, collector, rule_hits):
                 if tok:
                     if first_token_at is None:
                         first_token_at = time.monotonic()
@@ -244,6 +256,7 @@ async def retrieval(req: RetrievalRequest) -> StreamingResponse:
                 "degraded": collector.as_list(),
                 "timings": timings,
                 "budget_level": level.value,
+                "rule_hits": rule_hits,
             })
         except Exception as e:  # 兜底：主链任何未捕获异常 -> error 事件，绝不裸 500
             log.exception("retrieval pipeline failed: %s", e)

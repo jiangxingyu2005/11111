@@ -8,7 +8,7 @@ pymilvus 无官方 async 客户端:同步实现保留原样,AsyncMilvusClient �
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Optional
+from typing import Optional
 
 from .config import build_settings
 

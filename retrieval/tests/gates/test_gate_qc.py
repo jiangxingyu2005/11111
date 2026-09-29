@@ -17,7 +17,6 @@ import sys
 import time
 from pathlib import Path
 
-import pytest
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
@@ -227,7 +226,6 @@ def test_qc03_community_no_start_recorded(monkeypatch):
 
 def test_qc03_community_hit_level_skip_codes():
     """stale / summary_partial / no_evidence：单社区跳过 + 留痕，其余社区继续。"""
-    from app.degrade.codes import DegradedCode
     from app.degrade.orchestrator import DegradedCollector
     from app.recall.community_route import _backfill
 

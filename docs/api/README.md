@@ -17,6 +17,7 @@ qingxi 服务全部 HTTP 接口,按类别拆分到本目录各文件。Base URL 
 | 路由与对账 | [07-graph-route-reconcile.md](07-graph-route-reconcile.md) |
 | 图质量与消歧 | [08-graph-metrics-resolve.md](08-graph-metrics-resolve.md) |
 | IQ 检索库 | [09-iq.md](09-iq.md) |
+| 预设推理规则 | [10-rules.md](10-rules.md) |
 
 ## 端点总览
 
@@ -32,6 +33,7 @@ qingxi 服务全部 HTTP 接口,按类别拆分到本目录各文件。Base URL 
 | 路由与对账 | `/graph/route` `/graph/reconcile` | POST |
 | 图质量与消歧 | `/graph/metrics` `/graph/quality` `/graph/mesh/link-orphans` `/graph/resolve` | GET/POST |
 | IQ 检索库 | `/iq/ingest` `/iq/search` | POST |
+| 预设推理规则 | `/rules` `/rules/{rule_id}` | POST/GET/PUT/DELETE |
 
 ## 通用约定
 

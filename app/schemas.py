@@ -162,6 +162,44 @@ class ExtractionDictRead(BaseModel):
     updated_at: datetime
 
 
+class RuleCreate(BaseModel):
+    """新建预设推理规则（需求(7)：检索后触发预设推理规则）。"""
+    id: str                     # 语义主键，形如 "R_001"（调用方显式指定，非 UUID）
+    name: str
+    description: str = ""
+    condition: dict             # 谓词 DSL：{"all": [...], "any": [...]}
+    action: dict                # 命中动作：{"type":"mark","label","severity","hint"}
+    priority: int = 0
+    enabled: bool = True
+    kb_id: Optional[UUID] = None    # 空 = 全局规则
+
+
+class RuleUpdate(BaseModel):
+    """更新预设推理规则（仅传要改的字段；None = 不修改）。"""
+    name: Optional[str] = None
+    description: Optional[str] = None
+    condition: Optional[dict] = None
+    action: Optional[dict] = None
+    priority: Optional[int] = None
+    enabled: Optional[bool] = None
+    kb_id: Optional[UUID] = None
+
+
+class RuleRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    description: str
+    condition: dict
+    action: dict
+    priority: int
+    enabled: bool
+    kb_id: Optional[UUID] = None
+    created_at: datetime
+    updated_at: datetime
+
+
 class GraphQueryRequest(BaseModel):
     """在线查询请求:自然语言问题 + 知识库 id(可选,不传 = 全库)。"""
     query: str

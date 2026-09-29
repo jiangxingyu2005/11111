@@ -311,7 +311,8 @@ class FakeStore:
                   "content": p.get("content", ""),
                   "content_version": p.get("content_version", 1),
                   "summary": p.get("summary", ""),
-                  "keywords": p.get("keywords", [])}
+                  "keywords": p.get("keywords", []),
+                  "kg_confidence": p.get("kg_confidence")}
             for pid, p in ((pid, self.parents.get(pid)) for pid in parent_ids) if p
         }
 

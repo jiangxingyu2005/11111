@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from .api import documents, graph, iq, knowledge_bases, mesh, parse, seg
+from .api import documents, graph, iq, knowledge_bases, mesh, parse, rules, seg
 from .config import settings
 from .utils.database import SessionLocal, init_db
 
@@ -70,6 +70,7 @@ app = FastAPI(title="文档解析清洗服务", version="0.1.0", lifespan=lifesp
 
 app.include_router(parse.router)
 app.include_router(knowledge_bases.router)
+app.include_router(rules.router)
 app.include_router(documents.router)
 app.include_router(graph.router)
 app.include_router(seg.router)

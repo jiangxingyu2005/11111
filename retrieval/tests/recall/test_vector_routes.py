@@ -17,7 +17,6 @@ import sys
 from pathlib import Path
 from unittest import mock
 
-import pytest
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
@@ -32,7 +31,7 @@ os.environ.update({
     "NEO4J_URI": "bolt://127.0.0.1:7687", "NEO4J_USER": "ro", "NEO4J_PASSWORD": "x",
 })
 
-from app.config import effective_cfg, reset_caches  # noqa: E402
+from app.config import effective_cfg  # noqa: E402
 from app.degrade.codes import DegradedCode  # noqa: E402
 from app.degrade.orchestrator import DegradedCollector  # noqa: E402
 from app.understand.query_parser import Condition  # noqa: E402

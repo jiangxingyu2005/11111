@@ -13,11 +13,13 @@ from .graphrag import (
     SourceFileRegistry,
 )
 from .knowledge_base import KnowledgeBase
+from .rules import Rule
 
 __all__ = [
     "Document",
     "KnowledgeBase",
     "ExtractionDict",
+    "Rule",
     "ParentDocument",
     "ChunkRelation",
     "PendingExtraction",
