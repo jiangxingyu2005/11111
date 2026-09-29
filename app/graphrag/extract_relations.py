@@ -59,16 +59,21 @@ async def extract(session: AsyncSession, entities: list[Entity], llm: Optional[L
                   parents: list[dict], relation_defs: dict) -> tuple[list[Relation], list[Support]]:
     llm = llm or LLMClient()
     rel_types = set(_relation_types(relation_defs).keys())
-    # 中文名 -> en 归一化映射:小模型(如 ollama qwen2.5:3b)常输出中文 rel_type
-    # (如 "装备于"/"隶属")而非英文 en,这里在 _validate 前统一映射回 en。
+    # 中文名/触发词 -> en 归一化映射:小模型(如 ollama qwen2.5:3b)常输出中文 rel_type
+    # (如 "装备于"/"隶属"/"归属")而非英文 en,这里在 _validate 前统一映射回 en。
+    # 覆盖 name(关系名)与 trigger_words(同义触发词,如 "归属" 是 BELONGS_TO 的触发词)。
     rel_label_to_en: dict[str, str] = {}
     for r in relation_defs["relation_types"]:
         en = r.get("en", "")
-        if en:
-            rel_label_to_en[en] = en
+        if not en:
+            continue
+        rel_label_to_en[en] = en
         name = r.get("name", "")
         if name:
             rel_label_to_en[name] = en
+        for tw in (r.get("trigger_words") or []):
+            if tw:
+                rel_label_to_en[tw] = en
     # 低置信阈值取类型外置 min_confidence(默认 0.75),而非全局低阈值
     min_conf = {r["en"]: float(r.get("min_confidence", 0.75))
                 for r in relation_defs["relation_types"]}
@@ -99,15 +104,19 @@ async def extract(session: AsyncSession, entities: list[Entity], llm: Optional[L
             relation_defs["relation_types"], fewshot,
         )
         for raw in raw_list:
-            # mock/openai 返回 name -> 映射为 id
-            raw["head"] = name_to_id.get(raw.get("head"), raw.get("head"))
-            raw["tail"] = name_to_id.get(raw.get("tail"), raw.get("tail"))
+            # mock/openai 返回实体名 -> 映射为 id。实体名已 normalize_name(小写+去空白),
+            # 而小模型常回原大小写(如 AN/TPQ-50 vs 实体名 an/tpq-50),这里先归一化再查表。
+            raw["head"] = name_to_id.get(normalize_name(str(raw.get("head", ""))), raw.get("head"))
+            raw["tail"] = name_to_id.get(normalize_name(str(raw.get("tail", ""))), raw.get("tail"))
             # 中文 rel_type -> en 归一化(小模型偶发输出中文而非英文标识)
             rt = raw.get("rel_type")
             if isinstance(rt, str) and rt.strip() not in rel_types:
                 mapped = rel_label_to_en.get(rt.strip())
                 if mapped:
                     raw["rel_type"] = mapped
+            # 小模型偶发漏 confidence 字段,默认中档置信,不因此丢关系
+            if isinstance(raw, dict) and raw.get("confidence") is None:
+                raw["confidence"] = 0.8
             errors = _validate(raw, set(name_to_id.values()), rel_types,
                                id_to_type, rel_domains)
             conf = raw.get("confidence", 0.0) if isinstance(raw, dict) else 0.0

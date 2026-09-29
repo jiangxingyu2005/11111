@@ -27,6 +27,8 @@ def build_settings() -> dict:
             "max_tokens": settings.graphrag_llm_max_tokens,
             "max_retries": settings.graphrag_llm_max_retries,
             "use_function_calling": settings.graphrag_llm_use_function_calling,
+            "frequency_penalty": settings.graphrag_llm_frequency_penalty,
+            "presence_penalty": settings.graphrag_llm_presence_penalty,
         },
         "embedding": {
             "provider": settings.graphrag_embedding_provider,

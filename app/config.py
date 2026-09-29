@@ -134,6 +134,8 @@ class Settings(BaseSettings):
     graphrag_llm_max_tokens: int = 4096
     graphrag_llm_max_retries: int = 2            # function calling 网络/解析失败重试次数(准确度优先)
     graphrag_llm_use_function_calling: bool = True  # False=JSON prompt 输出(3B 等小模型不支持 function calling)
+    graphrag_llm_frequency_penalty: float = 0.5  # 重复抑制(3B greedy 解码易陷入实体名重复循环)
+    graphrag_llm_presence_penalty: float = 0.3   # 同上,抑制已出现 token 再被生成
 
     # 图抽取置信度三档分流
     graphrag_confidence_high: float = 0.9

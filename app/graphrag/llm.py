@@ -8,6 +8,7 @@ provider=openai/qwen 时走 OpenAI 兼容接口(function calling 约束 JSON)—
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Optional
 
@@ -36,10 +37,32 @@ class LLMClient:
             return self._extract_relations_openai(text, entities, relation_types or [], fewshot)
         return _mock_extract_relations(text, entities, relation_types or [])
 
-    def generate_answer(self, question: str, contexts: list[dict]) -> str:
+    def generate_answer(self, question: str, contexts: list[dict],
+                        graph_facts: Optional[list] = None) -> str:
         if self.is_llm:
-            return self._answer_openai(question, contexts)
+            return self._answer_openai(question, contexts, graph_facts)
         return _mock_answer(question, contexts)
+
+    def generate_answer_stream(self, question: str, contexts: list[dict],
+                               graph_facts: Optional[list] = None):
+        """流式生成(SSE 用)。openai/qwen 逐 token yield;mock 整段一次返回。
+
+        返回同步 generator,由调用方经 asyncio.to_thread 逐步拉取,不阻塞事件循环。
+        """
+        if not self.is_llm:
+            yield _mock_answer(question, contexts)
+            return
+        resp = self._client().chat.completions.create(
+            model=self.settings["llm"]["model"],
+            messages=_answer_messages(question, contexts, graph_facts),
+            temperature=0.0,
+            max_tokens=int(self.settings["llm"].get("max_tokens", 4096)),
+            stream=True,
+        )
+        for chunk in resp:
+            delta = chunk.choices[0].delta.content if chunk.choices else None
+            if delta:
+                yield delta
 
     # ---- 消歧灰区裁判(匹配器③,provider=openai/qwen 才激活)----
     def judge_same_entity(self, name_a: str, name_b: str, entity_type: str) -> bool:
@@ -67,6 +90,24 @@ class LLMClient:
         return OpenAI(base_url=s.get("base_url"), api_key=s.get("api_key") or "sk-dummy")
 
     def _extract_entities_openai(self, text, entity_types, entity_defs):
+        client = self._client()
+        llm_cfg = self.settings["llm"]
+        # 逐类硬约束:每类一个 function,该类的 json_schema 直接作为 properties 的 schema。
+        if entity_defs:
+            all_entities = []
+            for d in entity_defs:
+                name = d.get("name", "")
+                result = _call_function(
+                    client, llm_cfg, "extract_entities",
+                    _entity_type_instruction(name, d), text,
+                    _entity_function_schema(d.get("json_schema")),
+                )
+                for e in result.get("entities", []):
+                    if isinstance(e, dict):
+                        e["entity_type"] = name  # 类型由本次调用固定,回填给校验/归一化
+                        all_entities.append(e)
+            return all_entities
+        # 无逐类定义 -> 退回单次调用(类型由 entity_types 列表描述)
         schema = {
             "type": "object",
             "properties": {"entities": {
@@ -79,17 +120,22 @@ class LLMClient:
             }},
             "required": ["entities"],
         }
-        return _call_function(self._client(), self.settings["llm"], "extract_entities",
-                              _entity_instruction(entity_types, entity_defs), text, schema)["entities"]
+        return _call_function(client, llm_cfg, "extract_entities",
+                              _entity_instruction(entity_types, None), text, schema)["entities"]
 
     def _extract_relations_openai(self, text, entities, relation_types, fewshot):
+        # rel_type 加 enum 硬约束:模型只能输出已定义关系类型的英文标识(不必拆多次调用)。
+        rel_type_field = {"type": "string"}
+        en_types = [r.get("en", "") for r in relation_types if r.get("en")]
+        if en_types:
+            rel_type_field["enum"] = en_types
         schema = {
             "type": "object",
             "properties": {"relations": {
                 "type": "array",
                 "items": {"type": "object", "properties": {
                     "head": {"type": "string"}, "tail": {"type": "string"},
-                    "rel_type": {"type": "string"}, "confidence": {"type": "number"},
+                    "rel_type": rel_type_field, "confidence": {"type": "number"},
                     "evidence": {"type": "string"},
                 }, "required": ["head", "tail", "rel_type", "confidence"]},
             }},
@@ -102,16 +148,30 @@ class LLMClient:
         return _call_function(self._client(), self.settings["llm"], "extract_relations",
                               instruction, text, schema)["relations"]
 
-    def _answer_openai(self, question, contexts):
-        ctx = "\n".join(f"[{i}] {c.get('content', '')}" for i, c in enumerate(contexts))
+    def _answer_openai(self, question, contexts, graph_facts=None):
         resp = self._client().chat.completions.create(
             model=self.settings["llm"]["model"],
-            messages=[{"role": "system", "content": "你是电磁信号情报助手，回答需引用来源编号。"},
-                      {"role": "user", "content": f"参考资料：\n{ctx}\n\n问题：{question}"}],
+            messages=_answer_messages(question, contexts, graph_facts),
             temperature=0.0,
             max_tokens=int(self.settings["llm"].get("max_tokens", 4096)),
         )
         return resp.choices[0].message.content
+
+
+def _answer_messages(question: str, contexts: list[dict],
+                     graph_facts: Optional[list] = None) -> list[dict]:
+    """组装回答 prompt:图关系事实(若有)+ 参考子块 + 问题。非流式/流式共用。"""
+    system = "你是电磁信号情报助手，回答需引用来源编号。"
+    parts: list[str] = []
+    if graph_facts:
+        parts.append("图谱关系事实（结构化的实体-关系，可直接据以回答）：\n"
+                     + "\n".join(f"- {f}" for f in graph_facts))
+    if contexts:
+        ctx = "\n".join(f"[{i}] {c.get('content', '')}" for i, c in enumerate(contexts))
+        parts.append(f"参考资料：\n{ctx}")
+    parts.append(f"问题：{question}")
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": "\n\n".join(parts)}]
 
 
 def _call_function(client, s: dict, name: str, instruction: str, text: str, schema: dict) -> dict:
@@ -128,12 +188,15 @@ def _call_function(client, s: dict, name: str, instruction: str, text: str, sche
     use_fc = bool(s.get("use_function_calling", True))
     max_retries = int(s.get("max_retries", 2))
     last_err: Optional[Exception] = None
+    prev_raw: Optional[str] = None
     for attempt in range(max_retries + 1):
         try:
             if use_fc:
                 resp = client.chat.completions.create(
                     model=s["model"], temperature=0.0,
                     max_tokens=int(s.get("max_tokens", 4096)),
+                    frequency_penalty=float(s.get("frequency_penalty", 0.0)),
+                    presence_penalty=float(s.get("presence_penalty", 0.0)),
                     messages=[{"role": "system", "content": instruction},
                               {"role": "user", "content": text}],
                     tools=[{"type": "function", "function": {"name": name, "parameters": schema}}],
@@ -153,13 +216,24 @@ def _call_function(client, s: dict, name: str, instruction: str, text: str, sche
                 sys_prompt = (instruction
                               + f"\n\n只输出一个 JSON 对象,不要输出任何其它文字。输出格式示例:\n"
                               + _output_example(name))
+                # 重试时把上一次的坏输出回喂给模型修复(温度 0 下直接重发同 prompt 会原样复现)。
+                if attempt > 0 and prev_raw:
+                    user_text = (f"原始任务文本:\n{text}\n\n"
+                                 f"你上一次的输出:\n{prev_raw}\n\n"
+                                 f"上面的输出不是合法 JSON,请修正格式(补逗号、闭合括号、转义引号),"
+                                 f"只输出修正后的 JSON 对象,不要任何解释。")
+                else:
+                    user_text = text
                 resp = client.chat.completions.create(
                     model=s["model"], temperature=0.0,
                     max_tokens=int(s.get("max_tokens", 4096)),
+                    frequency_penalty=float(s.get("frequency_penalty", 0.0)),
+                    presence_penalty=float(s.get("presence_penalty", 0.0)),
                     messages=[{"role": "system", "content": sys_prompt},
-                              {"role": "user", "content": text}],
+                              {"role": "user", "content": user_text}],
                 )
                 raw = resp.choices[0].message.content
+            prev_raw = raw
             result = _parse_json(raw)
             # 兜底:小模型偶发只输出数组、漏掉 {key:[...]} 包装,统一包回对象,避免调用方 KeyError
             if isinstance(result, list):
@@ -204,18 +278,29 @@ def _parse_json(raw: str) -> dict:
     start, end = raw.find("{"), raw.rfind("}")
     if start == -1 or end == -1 or end <= start:
         raise ValueError(f"LLM 返回非 JSON: {raw[:200]!r}")
-    return json.loads(raw[start:end + 1])
+    block = raw[start:end + 1]
+    # 容错:去掉 }/] 前的尾随逗号(小模型偶发 {"a":1,} / [1,2,])
+    block = re.sub(r",(\s*[}\]])", r"\1", block)
+    return json.loads(block)
 
 
 def _entity_instruction(entity_types: Optional[list], entity_defs: Optional[list]) -> str:
-    """实体抽取指令:有完整定义(entity_defs)时讲清每类含义,否则退回类型名列表。"""
+    """实体抽取指令:有完整定义(entity_defs)时讲清每类含义与属性 schema,否则退回类型名列表。"""
+    tail = ("注意：实体类型只能从上述列表中选择，禁止用报告字段名(如国别/制造商/频段/体制/用途)当类型；"
+            "字段名对应的值按语义归入上述类型(如国别/制造商/部队名→组织，装备型号→辐射源)。"
+            "每个实体只输出一次，不要重复。")
     if entity_defs:
         lines = []
         for d in entity_defs:
             name, desc = d.get("name", ""), d.get("description", "")
-            lines.append(f"- {name}：{desc}" if desc else f"- {name}")
-        return "抽取电磁信号领域实体，类型限定如下：\n" + "\n".join(lines)
-    return f"抽取电磁信号领域实体，类型限定：{entity_types}"
+            line = f"- {name}：{desc}" if desc else f"- {name}"
+            js = d.get("json_schema")
+            if js:
+                line += (f"\n  该类型属性字段(properties 按此结构填)："
+                         f"{json.dumps(js, ensure_ascii=False)}")
+            lines.append(line)
+        return "抽取电磁信号领域实体，类型限定如下：\n" + "\n".join(lines) + "\n\n" + tail
+    return f"抽取电磁信号领域实体，类型限定：{entity_types}\n\n" + tail
 
 
 def _relation_instruction(entity_names: list, relation_types: list) -> str:
@@ -224,9 +309,42 @@ def _relation_instruction(entity_names: list, relation_types: list) -> str:
     for r in relation_types:
         name, en, desc = r.get("name", ""), r.get("en", ""), r.get("description", "")
         label = f"{name}（{en}）" if name and en else (name or en)
-        lines.append(f"- {label}：{desc}" if desc else f"- {label}")
+        line = f"- {label}：{desc}" if desc else f"- {label}"
+        js = r.get("json_schema")
+        if js:
+            line += f"\n  该关系属性字段(按此结构填)：{json.dumps(js, ensure_ascii=False)}"
+        lines.append(line)
     return (f"从实体 {entity_names} 中抽取关系，关系类型限定如下"
             f"（rel_type 字段用括号内英文标识）：\n" + "\n".join(lines))
+
+
+def _entity_function_schema(json_schema: Optional[dict]) -> dict:
+    """单类型实体的 function-calling schema:该类型 json_schema 硬约束 properties 结构。"""
+    props = dict(json_schema) if isinstance(json_schema, dict) else {"type": "object"}
+    return {
+        "type": "object",
+        "properties": {"entities": {
+            "type": "array",
+            "items": {"type": "object", "properties": {
+                "name": {"type": "string"},
+                "aliases": {"type": "array", "items": {"type": "string"}},
+                "properties": props,
+                "confidence": {"type": "number"},
+            }, "required": ["name", "confidence"]},
+        }},
+        "required": ["entities"],
+    }
+
+
+def _entity_type_instruction(name: str, d: dict) -> str:
+    """单类型实体抽取指令(每类一个 function,类型由指令固定)。"""
+    desc = d.get("description", "")
+    js = d.get("json_schema")
+    tail = "每个实体只输出一次，不要重复；实体名不能为空，属性按给定的 properties 结构填写。"
+    line = f"从文本中抽取「{name}」类型的实体" + (f"（{desc}）" if desc else "")
+    if js:
+        line += f"\n该类型属性字段(properties 按此结构填)：{json.dumps(js, ensure_ascii=False)}"
+    return f"{line}。\n{tail}"
 
 
 # ====================================================================

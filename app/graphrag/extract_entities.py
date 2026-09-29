@@ -53,6 +53,9 @@ async def extract(session: AsyncSession, llm: Optional[LLMClient], parents: list
         raw_list = await asyncio.to_thread(llm.extract_entities, p.get("content", ""),
                                            allowed_types, entity_defs)
         for raw in raw_list:
+            # 小模型(如 ollama qwen2.5:3b)偶发漏 confidence 字段,默认中档置信,不因此丢实体
+            if isinstance(raw, dict) and raw.get("confidence") is None:
+                raw["confidence"] = 0.8
             errors = _validate(raw, allowed_types)
             conf = raw.get("confidence", 0.0) if isinstance(raw, dict) else 0.0
             if errors or conf < low:

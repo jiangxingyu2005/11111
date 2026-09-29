@@ -78,6 +78,7 @@ async def load_relations(session: AsyncSession) -> dict:
             "min_confidence": float(r.min_confidence) if r.min_confidence is not None else 0.75,
             "head_types": list(r.head_types or []),
             "tail_types": list(r.tail_types or []),
+            "json_schema": dict(r.json_schema) if r.json_schema else None,
             "symmetric": False,
         }
         for r in rows
