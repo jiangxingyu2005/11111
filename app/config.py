@@ -133,6 +133,7 @@ class Settings(BaseSettings):
     graphrag_llm_temperature: float = 0.0
     graphrag_llm_max_tokens: int = 4096
     graphrag_llm_max_retries: int = 2            # function calling 网络/解析失败重试次数(准确度优先)
+    graphrag_llm_use_function_calling: bool = True  # False=JSON prompt 输出(3B 等小模型不支持 function calling)
 
     # 图抽取置信度三档分流
     graphrag_confidence_high: float = 0.9

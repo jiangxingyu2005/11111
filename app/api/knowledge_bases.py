@@ -2,7 +2,7 @@
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,9 +22,24 @@ async def create_kb(payload: KnowledgeBaseCreate, db: AsyncSession = Depends(get
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"知识库名称已存在: {payload.name}")
 
 
-@router.get("", response_model=list[KnowledgeBaseRead])
-async def list_kbs(db: AsyncSession = Depends(get_db)) -> list[KnowledgeBaseRead]:
-    return await kb.list_kbs(db)
+@router.get("")
+async def list_kbs(
+    db: AsyncSession = Depends(get_db),
+    page: int = Query(1, ge=1, description="页码,从 1 开始"),
+    page_size: int | None = Query(None, ge=1, le=100, description="每页条数;不传则返回全量列表"),
+):
+    """知识库列表:不传 page_size 返回全量(兼容旧接口);传了则分页。"""
+    if page_size is None:
+        rows = await kb.list_kbs(db)
+        return [KnowledgeBaseRead.model_validate(r).model_dump(mode="json") for r in rows]
+
+    items, total = await kb.list_kbs_page(db, page, page_size)
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "items": [KnowledgeBaseRead.model_validate(r).model_dump(mode="json") for r in items],
+    }
 
 
 @router.get("/{kb_id}", response_model=KnowledgeBaseRead)

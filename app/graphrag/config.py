@@ -26,6 +26,7 @@ def build_settings() -> dict:
             "temperature": settings.graphrag_llm_temperature,
             "max_tokens": settings.graphrag_llm_max_tokens,
             "max_retries": settings.graphrag_llm_max_retries,
+            "use_function_calling": settings.graphrag_llm_use_function_calling,
         },
         "embedding": {
             "provider": settings.graphrag_embedding_provider,

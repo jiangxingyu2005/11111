@@ -63,8 +63,10 @@ async def _embed_query_full(query: str, conditions: list | None = None) -> dict:
         emb = body["embeddings"][0]
         # 端点契约：允许只出 dense（list），或出 {"dense":..., "sparse":...}
         if isinstance(emb, dict):
+            sp = emb.get("sparse")
+            # JSON 往返把 token_id 键变成字符串，须转回 int 与 seed 侧 text_sparse 对齐（IP 内积同键型才可比）
             return {"dense": emb["dense"], "dense_v2": dense_v2,
-                    "sparse": emb.get("sparse")}
+                    "sparse": {int(k): float(v) for k, v in sp.items()} if sp else None}
         return {"dense": emb, "dense_v2": dense_v2, "sparse": None}
 
 
@@ -195,7 +197,8 @@ def _milvus_search(routes: dict[str, dict], scope: list[str], cfg: dict) -> list
         search_params={"metric_type": dense_cfg.get("metric_type", "COSINE")},
         limit=int(dense_cfg.get("top_k", 100)),
         filter=scope_expr,
-        output_fields=["parent_id", "content", "kg_entity_ids", "kb_id", "span"],
+        output_fields=["parent_id", "content", "kg_entity_ids", "kb_id",
+                       "section", "span_start", "span_end"],
     )
     return _to_hits(res[0], tau=float(dense_cfg.get("threshold", 0.72)))
 
@@ -239,9 +242,22 @@ def _milvus_hybrid_search(routes: dict[str, dict], scope: list[str], cfg: dict) 
         reqs=reqs,
         ranker=RRFRanker(k=int(cfg.get("hybrid", {}).get("rrfranker", {}).get("k", 60))),
         limit=int(cfg.get("hybrid", {}).get("top_k_after_hybrid", 50)),
-        output_fields=["parent_id", "content", "kg_entity_ids", "kb_id", "span"],
+        output_fields=["parent_id", "content", "kg_entity_ids", "kb_id",
+                       "section", "span_start", "span_end"],
     )
     return _to_hits(res[0], tau=0.0)   # hybrid 排序已是 RRF 序，不再叠加 τ 过滤
+
+
+def _reconstruct_span(ent: dict) -> list[int] | None:
+    """证据锚点 span：fake 侧 chunk 自带 `span`，real 侧 Milvus 存 span_start/span_end。"""
+    sp = ent.get("span")
+    if sp:
+        return sp
+    ss = ent.get("span_start")
+    se = ent.get("span_end")
+    if ss is not None and se is not None:
+        return [int(ss), int(se)]
+    return None
 
 
 def _to_hits(rows, tau: float) -> list[Hit]:
@@ -250,15 +266,16 @@ def _to_hits(rows, tau: float) -> list[Hit]:
         if row["distance"] < tau:
             continue
         ent = row.get("entity", {})
+        # Milvus 返回主键按真实字段名（child_id），fake 返回统一 id；两者都兼容
         hits.append(Hit(
-            child_id=str(row["id"]),
+            child_id=str(row.get("child_id") or row.get("id")),
             parent_id=str(ent.get("parent_id", "")),
             rank_score=float(row["distance"]),
             source="vector_hybrid",
             content=ent.get("content", "") or "",
             kg_entity_ids=ent.get("kg_entity_ids") or [],
             meta={"kb_id": ent.get("kb_id", ""),
-                  "span": ent.get("span"),           # IF-2：离线给了就有，没给就是 None
+                  "span": _reconstruct_span(ent),
                   "section": ent.get("section", "")},
         ))
     return hits

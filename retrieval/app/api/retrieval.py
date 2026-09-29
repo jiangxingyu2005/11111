@@ -5,8 +5,8 @@ SSE 只是传输方式，契约对象 = 所有事件聚合后的一份响应（�
 事件序列：meta -> progress* -> results -> assets -> token* -> done / error
 
 主链：QRY-02(L1+L3) -> ①③并行召回 -> 外层 RRF -> rerank -> QRY-06 父块回捞 -> 生成 -> done
-预算看门狗（QRY-07）在此真正驱动砍路：
-  >3.5s 砍重排 / >4.5s 砍图路 / >5.0s 砍稀疏与 NL2Query；每砍必留 degraded（禁静默降级）
+预算看门狗（QRY-07）在此真正驱动砍路（阈值见 config/retrieval.yaml 的 degradation.cutoffs，
+  当前 8/10/12/15s）：>8s 砍重排 / >10s 砍图路 / >12s 砍稀疏与 NL2Query；每砍必留 degraded（禁静默降级）
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from ..generate.report import stream_report
 from ..graph.expand import focus_entities
 from ..recall import bm25_route, community_route, graph_route, vector_route
 from ..trace.spans import TraceRecorder, bind_trace, new_trace_id
-from ..understand.query_parser import parse
+from ..understand.query_parser import parse, parse_l2
 
 log = logging.getLogger("retrieval.api")
 router = APIRouter()
@@ -71,12 +71,20 @@ async def retrieval(req: RetrievalRequest) -> StreamingResponse:
             yield _sse("progress", {"stage": "understand", "intent": pq.intent,
                                     "conditions": [c.to_dict() for c in pq.conditions]})
 
+            # ── L2 结构化抽取：不在召回前起跑，改为重排后起跑（串行化）──
+            # CPU 机上 ollama(L2/生成) 与 model_stub(BGE-M3 嵌入 + reranker 交叉编码器)
+            # 争同一批核。并行会互相拖慢：首查召回返空、重排 16s 超时。L2 结果只影响
+            # 响应 meta.conditions，从不影响召回（召回在合并前跑），故可安全延后到重排后，
+            # 与嵌入/重排完全串行。真正起跑见下方 rerank 之后的 fire 块。
+            l2_task = None
+            t_l2_fire = 0.0
+
             # ── QRY-07 预算决策（砍路，不是砍语义）──
             cfg = effective_cfg()
             level = watchdog.current_level()
             run_graph = get_settings().retrieval_graph_route_enabled
             run_community = get_settings().retrieval_community_enabled
-            if level.value in ("L2", "L1", "L0"):        # >4.5s：先砍社区摘要，再砍图路保主链
+            if level.value in ("L2", "L1", "L0"):        # >10s：先砍社区摘要，再砍图路保主链
                 if run_community:
                     collector.record(DegradedCode.BUDGET_CUT_COMMUNITY,
                                      f"budget level={level.value}, elapsed={watchdog.elapsed_s():.2f}s",
@@ -122,7 +130,7 @@ async def retrieval(req: RetrievalRequest) -> StreamingResponse:
             span = tracer.start("rerank")
             t0 = time.monotonic()
             level = watchdog.current_level()
-            if level.value in ("L3", "L2", "L1", "L0"):   # >3.5s：砍重排
+            if level.value in ("L3", "L2", "L1", "L0"):   # >8s：砍重排
                 collector.record(DegradedCode.RERANK_SKIPPED,
                                  f"budget level={level.value}", "rerank")
                 top = fused[:int(cfg.get("reranker", {}).get("top_k_out", 5))]
@@ -134,6 +142,13 @@ async def retrieval(req: RetrievalRequest) -> StreamingResponse:
             span.degraded_codes = collector.codes()
             span.close()
 
+            # ── L2 结构化抽取（重排后起跑：与嵌入/重排串行，避免 CPU 争用）──
+            # 放这里之后，后续 backfill(PG IO)/results 组装都是毫秒级且不占模型算力，
+            # ollama 跑 L2 时不会再与 BGE-M3 或 reranker 抢核；生成阶段自然排队在 L2 后。
+            if pq.l2_needed and get_settings().graphrag_llm_base_url:
+                t_l2_fire = time.monotonic()
+                l2_task = asyncio.create_task(parse_l2(req.query, collector))
+
             # ── QRY-06 父块回捞（PG 熔断 -> 行内 content 兜底）──
             span = tracer.start("backfill")
             t0 = time.monotonic()
@@ -141,6 +156,25 @@ async def retrieval(req: RetrievalRequest) -> StreamingResponse:
             timings["pg_fetch_ms"] = int((time.monotonic() - t0) * 1000)
             span.hit_count = len(parents)
             span.close()
+
+            # ── 合并 L2 结果（生成前；按 L2 自身起跑时间算预算，不被生成时长吃掉）──
+            if l2_task is not None:
+                budget_ms = int(cfg.get("timeout", {}).get("nl2query_ms", 20000))
+                elapsed_l2_ms = (time.monotonic() - t_l2_fire) * 1000
+                grace = max(0.0, (budget_ms - elapsed_l2_ms) / 1000.0)
+                if grace > 0:
+                    try:
+                        l2pq = await asyncio.wait_for(l2_task, timeout=grace)
+                        if l2pq is not None:
+                            pq = l2pq
+                    except asyncio.TimeoutError:
+                        collector.record(DegradedCode.NL2QUERY_LLM_TIMEOUT,
+                                         f"L2 exceeded {budget_ms}ms budget", "query_parse")
+                else:
+                    # L2 自身已跑超预算，不阻塞主链；结果丢弃（后台任务仍在跑，下次请求受益）
+                    collector.record(DegradedCode.NL2QUERY_LLM_TIMEOUT,
+                                     f"L2 skipped: elapsed {elapsed_l2_ms:.0f}ms >= budget {budget_ms}ms",
+                                     "query_parse")
 
             # ── results（证据锚点 child_id + span；IF-2 未就位则 span=null 并留痕）──
             results = []
@@ -198,6 +232,9 @@ async def retrieval(req: RetrievalRequest) -> StreamingResponse:
             span.close()
 
             timings["total_ms"] = int((time.monotonic() - t_start) * 1000)
+            # budget_level 必须取【检索段】的最终档位，不能在生成后再 current_level()——
+            # 生成(35s+)会把 elapsed 顶到 >15s，恒报 L0，误导成「已退化为 PG 兜底」。
+            # 看门狗最后一次真正驱动砍路是在重排决策点(见 rerank 段)，此处 level 即该档位。
             yield _sse("done", {
                 "contract_version": CONTRACT_VERSION,
                 "trace_id": trace_id,
@@ -206,7 +243,7 @@ async def retrieval(req: RetrievalRequest) -> StreamingResponse:
                 "graph_ref": graph_ref,
                 "degraded": collector.as_list(),
                 "timings": timings,
-                "budget_level": watchdog.current_level().value,
+                "budget_level": level.value,
             })
         except Exception as e:  # 兜底：主链任何未捕获异常 -> error 事件，绝不裸 500
             log.exception("retrieval pipeline failed: %s", e)

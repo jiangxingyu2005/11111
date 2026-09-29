@@ -30,9 +30,11 @@ def _local_scores(query: str, texts: list[str]) -> list[float]:
 
 async def rerank(query: str, hits: list[Hit], collector: DegradedCollector) -> list[Hit]:
     cfg = effective_cfg().get("reranker", {})
+    top_in = int(cfg.get("top_k_in", 50))
     top_out = int(cfg.get("top_k_out", 5))
     threshold = float(cfg.get("threshold", 0.35))
     url = get_settings().retrieval_rerank_service_url
+    hits = hits[:top_in]   # 只精排 Top-N（CPU 上 cross-encoder 慢，50 条≈8s 会击穿预算）
     if not hits:
         return []
     try:

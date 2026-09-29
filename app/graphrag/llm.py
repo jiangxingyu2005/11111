@@ -109,41 +109,85 @@ class LLMClient:
             messages=[{"role": "system", "content": "你是电磁信号情报助手，回答需引用来源编号。"},
                       {"role": "user", "content": f"参考资料：\n{ctx}\n\n问题：{question}"}],
             temperature=0.0,
+            max_tokens=int(self.settings["llm"].get("max_tokens", 4096)),
         )
         return resp.choices[0].message.content
 
 
 def _call_function(client, s: dict, name: str, instruction: str, text: str, schema: dict) -> dict:
-    """function calling 统一入口:重试 + 解析容错(准确度优先)。
+    """抽取统一入口:重试 + 解析容错(准确度优先)。
 
-    Qwen(vLLM 本地)偶发网络抖动或返回非纯 JSON(包 ```json 围栏 / tool_calls 为空),
-    这里重试并回退从 content 提取,耗尽仍失败才抛(由调用方隔离到 pending_extraction)。
+    两条通道:
+    - use_function_calling=True(默认):function calling(tools/tool_choice)强约束 JSON。
+      Qwen(vLLM 本地)偶发网络抖动或返回非纯 JSON,这里重试并回退从 content 提取。
+    - use_function_calling=False:小模型(如 ollama qwen2.5:3b)不支持 function calling,
+      把 schema 内嵌进 prompt 要求输出 JSON,再走 _parse_json 解析。两者复用同一解析容错。
     """
+    import json
     import time
+    use_fc = bool(s.get("use_function_calling", True))
     max_retries = int(s.get("max_retries", 2))
     last_err: Optional[Exception] = None
     for attempt in range(max_retries + 1):
         try:
-            resp = client.chat.completions.create(
-                model=s["model"], temperature=0.0,
-                messages=[{"role": "system", "content": instruction},
-                          {"role": "user", "content": text}],
-                tools=[{"type": "function", "function": {"name": name, "parameters": schema}}],
-                tool_choice={"type": "function", "function": {"name": name}},
-            )
-            msg = resp.choices[0].message
-            raw = None
-            if getattr(msg, "tool_calls", None):
-                raw = msg.tool_calls[0].function.arguments
-            if not raw and getattr(msg, "content", None):
-                raw = msg.content
-            return _parse_json(raw)
+            if use_fc:
+                resp = client.chat.completions.create(
+                    model=s["model"], temperature=0.0,
+                    max_tokens=int(s.get("max_tokens", 4096)),
+                    messages=[{"role": "system", "content": instruction},
+                              {"role": "user", "content": text}],
+                    tools=[{"type": "function", "function": {"name": name, "parameters": schema}}],
+                    tool_choice={"type": "function", "function": {"name": name}},
+                )
+                msg = resp.choices[0].message
+                raw = None
+                if getattr(msg, "tool_calls", None):
+                    raw = msg.tool_calls[0].function.arguments
+                if not raw and getattr(msg, "content", None):
+                    raw = msg.content
+            else:
+                # 小模型(如 ollama qwen2.5:3b)对裸 JSON Schema 理解不稳:把
+                # {"type":"object","properties":{...}} 当输出格式照抄,生成嵌套结构导致解析失败。
+                # 这里改用「具体扁平示例」作格式说明,小模型照抄示例即可输出合法扁平 JSON。
+                top_key = (schema.get("required") or [name])[0]
+                sys_prompt = (instruction
+                              + f"\n\n只输出一个 JSON 对象,不要输出任何其它文字。输出格式示例:\n"
+                              + _output_example(name))
+                resp = client.chat.completions.create(
+                    model=s["model"], temperature=0.0,
+                    max_tokens=int(s.get("max_tokens", 4096)),
+                    messages=[{"role": "system", "content": sys_prompt},
+                              {"role": "user", "content": text}],
+                )
+                raw = resp.choices[0].message.content
+            result = _parse_json(raw)
+            # 兜底:小模型偶发只输出数组、漏掉 {key:[...]} 包装,统一包回对象,避免调用方 KeyError
+            if isinstance(result, list):
+                top_key = (schema.get("required") or [name])[0]
+                result = {top_key: result}
+            return result
         except Exception as e:
             last_err = e
             if attempt < max_retries:
                 time.sleep(0.5 * (2 ** attempt))  # 指数退避 0.5s / 1s
                 continue
     raise last_err  # pragma: no cover - last_err 在异常路径必非空
+
+
+def _output_example(name: str) -> str:
+    """给 JSON-prompt 通道一个具体扁平输出示例(小模型照抄示例比理解 JSON Schema 稳)。
+
+    示例字段与 _extract_*_openai 的 schema 一一对应;小模型按示例的扁平结构输出即可。
+    """
+    if name == "extract_entities":
+        return ('{"entities": [{"name": "AN/TPQ-50", "entity_type": "辐射源", '
+                '"aliases": [], "properties": {}, "confidence": 0.9}]}')
+    if name == "extract_relations":
+        return ('{"relations": [{"head": "AN/TPQ-50", "tail": "地面车载平台", '
+                '"rel_type": "EQUIPPED_ON", "confidence": 0.9, "evidence": "装备于地面车载平台"}]}')
+    if name == "judge_same_entity":
+        return '{"same": true}'
+    return '{"' + name + '": []}'
 
 
 def _parse_json(raw: str) -> dict:

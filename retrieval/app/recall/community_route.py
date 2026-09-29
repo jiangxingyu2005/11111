@@ -77,7 +77,8 @@ def _scene_knn(dense: list[float], scope: list[str], ccfg: dict) -> list[dict]:
         filter=scope_expr,
         output_fields=["summary", "member_entity_ids", "stale", "kb_id"],
     )
-    return [{"community_id": str(r["id"]), "score": float(r["distance"]),
+    return [{"community_id": str(r.get("community_id") or r.get("id")),
+             "score": float(r["distance"]),
              "summary": (r["entity"].get("summary") or ""),
              "member_entity_ids": r["entity"].get("member_entity_ids") or [],
              "stale": bool(r["entity"].get("stale", False))}
@@ -132,26 +133,30 @@ def _expand(entity_ids: list[str], scope: list[str], ccfg: dict) -> list[dict]:
 
     from neo4j import GraphDatabase  # 懒加载
     s = get_settings()
-    cypher = """
-    MATCH (e:Entity)-[r*1..$hops]-(n:Entity)<-[:BINDS]-(seg:Segment)
+    hops = int(ccfg.get("hops", 2))  # 变量长关系跳数不能参数化，须内联（配置受控整数）
+    cypher = f"""
+    MATCH (e:Entity)-[r*1..{hops}]-(n:Entity)<-[:BINDS]-(seg:Chunk)
     WHERE e.entity_id IN $eids AND seg.kb_id IN $scope
     WITH seg, size([(n)-[]-() | 1]) AS deg
     WHERE deg <= $max_deg
     RETURN DISTINCT seg.chunk_id AS child_id, seg.parent_id AS parent_id,
-           seg.content AS content, seg.kb_id AS kb_id, seg.span AS span
+           seg.content AS content, seg.kb_id AS kb_id,
+           seg.span_start AS span_start, seg.span_end AS span_end
     LIMIT $limit
     """
     driver = GraphDatabase.driver(s.neo4j_uri, auth=(s.neo4j_user, s.neo4j_password))
     try:
         with driver.session() as sess:
             rows = sess.run(cypher, eids=entity_ids, scope=scope,
-                            hops=int(ccfg.get("hops", 2)),
                             max_deg=int(ccfg.get("max_degree", 50)),
                             limit=int(ccfg.get("limit", 50)))
             return [
                 {"child_id": str(r["child_id"]), "parent_id": str(r["parent_id"] or ""),
                  "content": r["content"] or "", "kb_id": r["kb_id"] or "",
-                 "kg_entity_ids": [], "span": r.get("span")}
+                 "kg_entity_ids": [],
+                 "span": [int(r["span_start"]), int(r["span_end"])]
+                 if r.get("span_start") is not None and r.get("span_end") is not None
+                 else None}
                 for r in rows
             ]
     finally:

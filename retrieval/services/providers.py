@@ -197,9 +197,15 @@ def _hash_embed(texts: list[str]) -> list[dict]:
     return [{"dense": hash_embedding(t), "sparse": hash_sparse(t)} for t in texts]
 
 
+_m3_cache: dict[str, object] = {}
+
+
 def _m3_embed(texts: list[str], kind: str, model_id: str) -> list[dict]:
     from FlagEmbedding import BGEM3FlagModel
-    m = BGEM3FlagModel(model_id, use_fp16=True)
+    m = _m3_cache.get(model_id)
+    if m is None:                      # CPU 加载 2.3GB 权重很慢，进程级缓存避免每请求重载
+        m = BGEM3FlagModel(model_id, use_fp16=False)
+        _m3_cache[model_id] = m
     out = (m.encode(texts, return_dense=True, return_sparse=True) if kind != "query"
            else m.encode_queries(texts, return_dense=True, return_sparse=True))
     return [{"dense": out["dense_vecs"][i].tolist(),
@@ -279,6 +285,9 @@ class EmbedProvider:
                 "count": len(embs), "elapsed_ms": int((time.time() - t0) * 1000)}
 
 
+_rerank_cache: dict[str, object] = {}
+
+
 class RerankProvider:
     """重排 Provider。契约：{scores, model}，scores 与 texts 同序。"""
 
@@ -288,8 +297,11 @@ class RerankProvider:
     def _local(self, query: str, texts: list[str]) -> list[float]:
         if self.backend == "bge":
             from FlagEmbedding import FlagReranker
-            r = FlagReranker(self.model_id, use_fp16=True)
-            return [float(x) for x in r.compute_score([[query, t] for t in texts])]
+            r = _rerank_cache.get(self.model_id)
+            if r is None:                    # CPU 加载重，进程级缓存避免每请求重载
+                r = FlagReranker(self.model_id, use_fp16=False)  # CPU 无 CUDA，fp16 会炸
+                _rerank_cache[self.model_id] = r
+            return [float(x) for x in r.compute_score([[query, t] for t in texts], normalize=True)]
         from app.store.hash_embed import cosine, hash_embedding
         qv = hash_embedding(query)
         return [round(max(0.0, (cosine(qv, hash_embedding(t)) + 1.0) / 2.0) ** 3, 6)
@@ -346,6 +358,11 @@ class LLMProvider:
             return await self._proxy(payload)     # generic 也走透传，仅换 URL/头
         return None                                # 交给 echo 分支
 
+    def warm(self) -> None:
+        """预加载 hf 模型权重（CPU 读盘+初始化 10s+，避免首查超时）。非 hf 后端为 no-op。"""
+        if self.backend == "hf":
+            _load_hf(self.cfg.model or self.model_id)
+
     def _url(self) -> str:
         return self.cfg.url.rstrip("/") + "/chat/completions"
 
@@ -386,7 +403,11 @@ class LLMProvider:
         return StreamingResponse(gen(), media_type="text/event-stream")
 
     async def _hf(self, payload: dict):
-        """进程内 transformers 真生成（CPU 小模型跑通链路用，非生产形态）。"""
+        """进程内 transformers 真生成（CPU 小模型跑通链路用，非生产形态）。
+
+        stream=False -> 返回 OpenAI 兼容 JSON dict（nl2query 结构化抽取用）；
+        stream=True  -> StreamingResponse（报告生成用）。
+        """
         import asyncio
         import queue
         import threading
@@ -397,11 +418,30 @@ class LLMProvider:
         text = tok.apply_chat_template(payload["messages"], tokenize=False,
                                        add_generation_prompt=True)
         inputs = tok([text], return_tensors="pt")
+        max_new = int(os.getenv("HF_MAX_NEW_TOKENS", "256"))
+        gen_kw = dict(max_new_tokens=max_new, do_sample=False,
+                      temperature=None, top_p=None)
+
+        # 非流式：同步 generate，返回标准 chat.completion（L2 结构化 JSON 抽取用）
+        if not payload.get("stream"):
+            def _run():
+                out = mdl.generate(**inputs, **gen_kw)
+                in_len = inputs["input_ids"].shape[1]
+                return tok.decode(out[0][in_len:], skip_special_tokens=True)
+
+            content = await asyncio.get_running_loop().run_in_executor(None, _run)
+            return {
+                "id": f"hf-{abs(hash(model_id))}",
+                "object": "chat.completion",
+                "model": model_id,
+                "choices": [{"message": {"role": "assistant", "content": content},
+                             "index": 0, "finish_reason": "stop"}],
+                "usage": {"total_tokens": len(tok.encode(content))},
+            }
+
         from transformers import TextIteratorStreamer
         streamer = TextIteratorStreamer(tok, skip_prompt=True, skip_special_tokens=True)
-        kw = dict(**inputs, streamer=streamer,
-                  max_new_tokens=int(os.getenv("HF_MAX_NEW_TOKENS", "256")),
-                  do_sample=False, temperature=None, top_p=None)
+        kw = dict(**inputs, streamer=streamer, **gen_kw)
         q: queue.Queue = queue.Queue()
 
         def worker():
@@ -438,7 +478,13 @@ def _load_hf(model_id: str):
     if model_id not in _hf_cache:
         from transformers import AutoModelForCausalLM, AutoTokenizer
         tok = AutoTokenizer.from_pretrained(model_id)
-        mdl = AutoModelForCausalLM.from_pretrained(model_id)
+        # CPU 低内存推理：优先 bf16（3B 约 6GB，省一半内存）；OOM/不支持则回退 fp32
+        try:
+            import torch
+            mdl = AutoModelForCausalLM.from_pretrained(
+                model_id, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True)
+        except Exception:
+            mdl = AutoModelForCausalLM.from_pretrained(model_id, low_cpu_mem_usage=True)
         mdl.eval()
         _hf_cache[model_id] = (tok, mdl)
     return _hf_cache[model_id]

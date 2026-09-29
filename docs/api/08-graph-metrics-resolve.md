@@ -2,13 +2,13 @@
 
 ## `GET /graph/metrics` — 图质量四指标
 
-**传入示例**:
+**URL**：`GET http://192.168.31.15:8001/graph/metrics`
 
-```bash
-curl http://127.0.0.1:8001/graph/metrics
-```
+**请求数据**：无。
 
-**传出示例**:
+**请求示例**：`GET http://192.168.31.15:8001/graph/metrics`
+
+**响应示例**：
 
 ```json
 {
@@ -23,13 +23,13 @@ curl http://127.0.0.1:8001/graph/metrics
 
 ## `GET /graph/quality` — 漏抽质检门禁
 
-**传入示例**:
+**URL**：`GET http://192.168.31.15:8001/graph/quality`
 
-```bash
-curl http://127.0.0.1:8001/graph/quality
-```
+**请求数据**：无。
 
-**传出示例**:
+**请求示例**：`GET http://192.168.31.15:8001/graph/quality`
+
+**响应示例**：
 
 ```json
 {
@@ -49,15 +49,15 @@ curl http://127.0.0.1:8001/graph/quality
 
 ## `POST /graph/mesh/link-orphans` — 孤儿兜底绑定
 
-无 body,幂等。对 `kg_entity_id` 为空的父块按别名/指纹兜底绑定。
+无 body，幂等。对 `kg_entity_id` 为空的父块按别名/指纹兜底绑定。
 
-**传入示例**:
+**URL**：`POST http://192.168.31.15:8001/graph/mesh/link-orphans`
 
-```bash
-curl -X POST http://127.0.0.1:8001/graph/mesh/link-orphans
-```
+**请求数据**：无。
 
-**传出示例**:
+**请求示例**：`POST http://192.168.31.15:8001/graph/mesh/link-orphans`
+
+**响应示例**：
 
 ```json
 {
@@ -68,18 +68,22 @@ curl -X POST http://127.0.0.1:8001/graph/mesh/link-orphans
 
 ## `POST /graph/resolve` — 全量消歧归并
 
-历史重复实体批量归并(四层回填:PG registry / Neo4j / PG parent / Milvus)。
+历史重复实体批量归并（四层回填：PG registry / Neo4j / PG parent / Milvus）。
 
-**传入示例**:
+**URL**：`POST http://192.168.31.15:8001/graph/resolve`
 
-```bash
-# 预演(只返回归并计划,不落库)
-curl -X POST "http://127.0.0.1:8001/graph/resolve?dry_run=true"
-# 落库执行
-curl -X POST http://127.0.0.1:8001/graph/resolve
-```
+**请求数据**（query 参数，可选）：
 
-**传出示例**:
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `dry_run` | bool | 否 | `true` 只返回归并计划不落库，默认 `false` |
+
+**请求示例**：
+
+- 预演：`POST http://192.168.31.15:8001/graph/resolve?dry_run=true`
+- 落库执行：`POST http://192.168.31.15:8001/graph/resolve`
+
+**响应示例**：
 
 ```json
 {
@@ -94,5 +98,5 @@ curl -X POST http://127.0.0.1:8001/graph/resolve
 }
 ```
 
-- `dry_run=true` 只返回归并计划,不落库;幂等(重复调用 `merged=[]`、计数 0)。
-- 错误:`502` Neo4j/Milvus 不可用。
+- `dry_run=true` 只返回归并计划，不落库；幂等（重复调用 `merged=[]`、计数 0）。
+- 错误：`502` Neo4j/Milvus 不可用。

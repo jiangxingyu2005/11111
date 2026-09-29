@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models import PendingExtraction
 from . import db
 from .config import load_few_shot
-from .ids import canonical_relation_id
+from .ids import canonical_relation_id, normalize_name
 from .llm import LLMClient
 from .models import Entity, Relation, Support
 
@@ -59,6 +59,16 @@ async def extract(session: AsyncSession, entities: list[Entity], llm: Optional[L
                   parents: list[dict], relation_defs: dict) -> tuple[list[Relation], list[Support]]:
     llm = llm or LLMClient()
     rel_types = set(_relation_types(relation_defs).keys())
+    # 中文名 -> en 归一化映射:小模型(如 ollama qwen2.5:3b)常输出中文 rel_type
+    # (如 "装备于"/"隶属")而非英文 en,这里在 _validate 前统一映射回 en。
+    rel_label_to_en: dict[str, str] = {}
+    for r in relation_defs["relation_types"]:
+        en = r.get("en", "")
+        if en:
+            rel_label_to_en[en] = en
+        name = r.get("name", "")
+        if name:
+            rel_label_to_en[name] = en
     # 低置信阈值取类型外置 min_confidence(默认 0.75),而非全局低阈值
     min_conf = {r["en"]: float(r.get("min_confidence", 0.75))
                 for r in relation_defs["relation_types"]}
@@ -75,8 +85,12 @@ async def extract(session: AsyncSession, entities: list[Entity], llm: Optional[L
     supports: list[Support] = []
 
     for p in parents:
-        # 该父块覆盖到的实体(按其名称出现在正文中)
-        parent_entities = [e for e in entities if e.name in p.get("content", "")]
+        # 该父块覆盖到的实体(按其归一化名称出现在归一化正文中)。
+        # 实体名已被 normalize_name 小写化(如 AN/TPQ-50 -> an/tpq-50),正文仍是原始大小写,
+        # 若直接 e.name in content 做大小写敏感匹配会全部落空、关系抽取被跳过(LLM 从未调用)。
+        # 这里把正文也归一化后再做子串匹配,保证英文大写实体/含空格中文名能命中原文。
+        norm_content = normalize_name(p.get("content", ""))
+        parent_entities = [e for e in entities if normalize_name(e.name) in norm_content]
         if not parent_entities:
             continue
         raw_list = await asyncio.to_thread(
@@ -88,6 +102,12 @@ async def extract(session: AsyncSession, entities: list[Entity], llm: Optional[L
             # mock/openai 返回 name -> 映射为 id
             raw["head"] = name_to_id.get(raw.get("head"), raw.get("head"))
             raw["tail"] = name_to_id.get(raw.get("tail"), raw.get("tail"))
+            # 中文 rel_type -> en 归一化(小模型偶发输出中文而非英文标识)
+            rt = raw.get("rel_type")
+            if isinstance(rt, str) and rt.strip() not in rel_types:
+                mapped = rel_label_to_en.get(rt.strip())
+                if mapped:
+                    raw["rel_type"] = mapped
             errors = _validate(raw, set(name_to_id.values()), rel_types,
                                id_to_type, rel_domains)
             conf = raw.get("confidence", 0.0) if isinstance(raw, dict) else 0.0

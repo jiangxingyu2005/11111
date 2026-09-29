@@ -101,7 +101,7 @@ def main() -> int:
             idx.add_index(field_name="embedding_v2", index_type="AUTOINDEX", metric_type="COSINE")
         if args.with_sparse and name == s.milvus_chunk_collection:
             idx.add_index(field_name="text_sparse", index_type="SPARSE_INVERTED_INDEX",
-                          metric_type="BM25")
+                          metric_type="IP")
         client.create_collection(collection_name=name, schema=schema, index_params=idx)
         print(f"[init_milvus] created {name}")
 

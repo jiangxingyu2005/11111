@@ -1,27 +1,32 @@
 # 清洗解析
 
-统一 multipart/form-data。除 `return_content` 外,参数均同 `/parse`。
-
-| 参数 | 类型 | 必填 | 说明 |
-|---|---|---|---|
-| `files` | file[] | 是 | 上传文件 |
-| `kb_id` | UUID | 是 | 所属知识库 id(须已存在,否则 404) |
-| `return_content` | query bool | 否 | 是否返回清洗后 markdown 正文,默认 `true` |
+统一 `multipart/form-data`。除 `return_content` 外，参数均同 `/parse`。Base URL：`http://192.168.31.15:8001`。
 
 ## `POST /parse` — 文档解析
 
-MinerU 解析 → 清洗 → 打分 → 落盘 → MinIO → 登记 `documents` →(若 `GRAPHRAG_ENABLED=true`)GraphRAG 入库。
+MinerU 解析 → 清洗 → 打分 → 落盘 → MinIO → 登记 `documents` →（若 `GRAPHRAG_ENABLED=true`）GraphRAG 入库。
 
-**传入示例**:
+**URL**：`POST http://192.168.31.15:8001/parse`
 
-```bash
-curl -X POST http://127.0.0.1:8001/parse \
-  -F "files=@sample.pdf" \
-  -F "kb_id=2db770f2-7a09-4f04-9f07-fce5e6bf6529" \
-  -F "return_content=false"
+**请求数据**（`multipart/form-data`）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `files` | file[] | 是 | 上传文件（可多个） |
+| `kb_id` | UUID | 是 | 所属知识库 id（须已存在，否则 404） |
+| `return_content` | query bool | 否 | 是否返回清洗后 markdown 正文，默认 `true` |
+
+**请求示例**：
+
+```js
+const fd = new FormData();
+fd.append("files", file);   // 支持多文件：重复 append("files", fileN)
+fd.append("kb_id", "2db770f2-7a09-4f04-9f07-fce5e6bf6529");
+
+fetch("http://192.168.31.15:8001/parse?return_content=false", { method: "POST", body: fd });
 ```
 
-**传出示例** `ParseResponse`:
+**响应示例** `ParseResponse`：
 
 ```json
 {
@@ -46,7 +51,7 @@ curl -X POST http://127.0.0.1:8001/parse \
 }
 ```
 
-**失败示例**(单文件失败不中断整批):
+**失败示例**（单文件失败不中断整批）：
 
 ```json
 {"filename": "a.pdf", "doc_id": "", "success": false, "error": "处理失败: ..."}
@@ -54,74 +59,133 @@ curl -X POST http://127.0.0.1:8001/parse \
 
 ## `POST /parse-image` — 图片解析
 
-MinerU 优先,失败/空结果降级 PaddleOCR;BLIP 语义描述(英→中)并入正文。
+MinerU 优先，失败/空结果降级 PaddleOCR；BLIP 语义描述（英→中）并入正文。
 
-**传入示例**:
+**URL**：`POST http://192.168.31.15:8001/parse-image`
 
-```bash
-curl -X POST http://127.0.0.1:8001/parse-image \
-  -F "files=@sample.png" \
-  -F "kb_id=2db770f2-7a09-4f04-9f07-fce5e6bf6529"
+**请求数据**（`multipart/form-data`）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `files` | file[] | 是 | 上传图片（可多个） |
+| `kb_id` | UUID | 是 | 所属知识库 id |
+| `return_content` | query bool | 否 | 是否返回正文，默认 `true` |
+
+**请求示例**：
+
+```js
+const fd = new FormData();
+fd.append("files", file);
+fd.append("kb_id", "2db770f2-7a09-4f04-9f07-fce5e6bf6529");
+
+fetch("http://192.168.31.15:8001/parse-image", { method: "POST", body: fd });
 ```
 
-**传出示例**:同 `ParseResponse`(见上)。
+**响应示例**：同 `ParseResponse`（见上）。
 
 ## `POST /parse-audio` — 音频解析
 
-ASR(faster-whisper)转文字 → 清洗 → 打分 → 入库(不过 MinerU)。
+ASR（faster-whisper）转文字 → 清洗 → 打分 → 入库（不过 MinerU）。
 
-**传入示例**:
+**URL**：`POST http://192.168.31.15:8001/parse-audio`
 
-```bash
-curl -X POST http://127.0.0.1:8001/parse-audio \
-  -F "files=@sample.wav" \
-  -F "kb_id=2db770f2-7a09-4f04-9f07-fce5e6bf6529"
+**请求数据**（`multipart/form-data`）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `files` | file[] | 是 | 上传音频（可多个） |
+| `kb_id` | UUID | 是 | 所属知识库 id |
+| `return_content` | query bool | 否 | 是否返回正文，默认 `true` |
+
+**请求示例**：
+
+```js
+const fd = new FormData();
+fd.append("files", file);
+fd.append("kb_id", "2db770f2-7a09-4f04-9f07-fce5e6bf6529");
+
+fetch("http://192.168.31.15:8001/parse-audio", { method: "POST", body: fd });
 ```
 
-**传出示例**:同 `ParseResponse`。
+**响应示例**：同 `ParseResponse`。
 
 ## `POST /parse-video` — 视频解析
 
 抽帧 → 去重 → 逐帧图片链路 → 合并 → 清洗 → 打分 → 入库。
 
-**传入示例**:
+**URL**：`POST http://192.168.31.15:8001/parse-video`
 
-```bash
-curl -X POST http://127.0.0.1:8001/parse-video \
-  -F "files=@sample.mp4" \
-  -F "kb_id=2db770f2-7a09-4f04-9f07-fce5e6bf6529"
+**请求数据**（`multipart/form-data`）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `files` | file[] | 是 | 上传视频（可多个） |
+| `kb_id` | UUID | 是 | 所属知识库 id |
+| `return_content` | query bool | 否 | 是否返回正文，默认 `true` |
+
+**请求示例**：
+
+```js
+const fd = new FormData();
+fd.append("files", file);
+fd.append("kb_id", "2db770f2-7a09-4f04-9f07-fce5e6bf6529");
+
+fetch("http://192.168.31.15:8001/parse-video", { method: "POST", body: fd });
 ```
 
-**传出示例**:同 `ParseResponse`。
+**响应示例**：同 `ParseResponse`。
 
 ## `POST /parse-html` — HTML 解析
 
-提取正文(标题/段落/列表/表格转 markdown)→ 清洗 → 打分 → 入库。
+提取正文（标题/段落/列表/表格转 markdown）→ 清洗 → 打分 → 入库。
 
-**传入示例**:
+**URL**：`POST http://192.168.31.15:8001/parse-html`
 
-```bash
-curl -X POST http://127.0.0.1:8001/parse-html \
-  -F "files=@sample.html" \
-  -F "kb_id=2db770f2-7a09-4f04-9f07-fce5e6bf6529"
+**请求数据**（`multipart/form-data`）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `files` | file[] | 是 | 上传 HTML（可多个） |
+| `kb_id` | UUID | 是 | 所属知识库 id |
+| `return_content` | query bool | 否 | 是否返回正文，默认 `true` |
+
+**请求示例**：
+
+```js
+const fd = new FormData();
+fd.append("files", file);
+fd.append("kb_id", "2db770f2-7a09-4f04-9f07-fce5e6bf6529");
+
+fetch("http://192.168.31.15:8001/parse-html", { method: "POST", body: fd });
 ```
 
-**传出示例**:同 `ParseResponse`。
+**响应示例**：同 `ParseResponse`。
 
 ## `POST /parse-iq` — IQ 信号解析
 
-H5 → SNR 清洗 → IQ 补全 → 信号处理 → 26 特征中文描述入库。**不入图谱**(`in_kb` 保持 `false`)。
+H5 → SNR 清洗 → IQ 补全 → 信号处理 → 26 特征中文描述入库。**不入图谱**（`in_kb` 保持 `false`）。
 
-**传入示例**:
+**URL**：`POST http://192.168.31.15:8001/parse-iq`
 
-```bash
-curl -X POST http://127.0.0.1:8001/parse-iq \
-  -F "files=@test.h5" \
-  -F "kb_id=2db770f2-7a09-4f04-9f07-fce5e6bf6529" \
-  -F "return_content=false"
+**请求数据**（`multipart/form-data`）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `files` | file[] | 是 | 上传 H5 文件（可多个） |
+| `kb_id` | UUID | 是 | 所属知识库 id |
+| `return_content` | query bool | 否 | 是否返回正文，默认 `true` |
+
+**请求示例**：
+
+```js
+const fd = new FormData();
+fd.append("files", file);   // H5 文件
+fd.append("kb_id", "2db770f2-7a09-4f04-9f07-fce5e6bf6529");
+
+fetch("http://192.168.31.15:8001/parse-iq?return_content=false", { method: "POST", body: fd });
 ```
 
-**传出示例** `IqParseResponse`(在 `FileResult` 基础上多 IQ 中间结果):
+**响应示例** `IqParseResponse`（在 `FileResult` 基础上多 IQ 中间结果）：
 
 ```json
 {
@@ -153,13 +217,13 @@ curl -X POST http://127.0.0.1:8001/parse-iq \
 
 ## `GET /health` — 健康检查
 
-**传入示例**:
+**URL**：`GET http://192.168.31.15:8001/health`
 
-```bash
-curl http://127.0.0.1:8001/health
-```
+**请求数据**：无。
 
-**传出示例**:
+**请求示例**：`GET http://192.168.31.15:8001/health`
+
+**响应示例**：
 
 ```json
 {"status": "ok", "mineru": {"ok": true, "detail": "..."}}

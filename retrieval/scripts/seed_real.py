@@ -144,7 +144,7 @@ def seed_neo4j(wipe: bool) -> int:
                 rows=[{"entity_id": e["entity_id"], "name": e["name"],
                        "type": e["type"], "kb_id": e.get("kb_id", "")} for e in ents])
             sess.run(
-                "UNWIND $rows AS r MERGE (s:Segment {chunk_id: r.child_id}) "
+                "UNWIND $rows AS r MERGE (s:Chunk {chunk_id: r.child_id}) "
                 "SET s.parent_id = r.parent_id, s.content = r.content, s.kb_id = r.kb_id, "
                 "    s.span_start = r.span_start, s.span_end = r.span_end",
                 rows=[{"child_id": c["child_id"], "parent_id": c["parent_id"],
@@ -154,7 +154,7 @@ def seed_neo4j(wipe: bool) -> int:
             binds = [e for e in edges if e.get("rel") == "BINDS"]
             sess.run(
                 "UNWIND $rows AS r MATCH (e:Entity {entity_id: r.src}) "
-                "MATCH (s:Segment {chunk_id: r.dst}) MERGE (s)-[:BINDS]->(e)",
+                "MATCH (s:Chunk {chunk_id: r.dst}) MERGE (s)-[:BINDS]->(e)",
                 rows=[{"src": e["src"], "dst": e["dst"]} for e in binds])
             typed = {}
             for e in edges:

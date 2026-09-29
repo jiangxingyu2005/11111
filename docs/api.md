@@ -6,7 +6,7 @@
 - **GraphRAG 接口**(新增,ems_graphrag 融合)
 - **IQ 检索库接口**(新增,IQ 信号相似度检索 + 入库打标)
 
-所有业务端点均为 `async def`。Base URL 默认 `http://127.0.0.1:8001`(端口以实际启动为准)。
+所有业务端点均为 `async def`。Base URL 默认 `http://192.168.31.15:8001`(端口以实际启动为准)。
 
 ---
 
@@ -156,7 +156,7 @@ H5 → SNR 清洗 → IQ 补全 → 信号处理 → 26 特征中文描述入库
 **新增实体类型**:
 
 ```bash
-curl -X POST http://127.0.0.1:8001/graph/dict \
+curl -X POST http://192.168.31.15:8001/graph/dict \
   -H "Content-Type: application/json" \
   -d '{"name": "舰艇", "category": "entity", "description": "水面/水下作战平台"}'
 ```
@@ -164,7 +164,7 @@ curl -X POST http://127.0.0.1:8001/graph/dict \
 **新增关系**:
 
 ```bash
-curl -X POST http://127.0.0.1:8001/graph/dict \
+curl -X POST http://192.168.31.15:8001/graph/dict \
   -H "Content-Type: application/json" \
   -d '{"name": "指挥", "en": "COMMANDS", "category": "relation",
        "trigger_words": ["指挥", "统一指挥", "受令"], "min_confidence": 0.8}'
@@ -173,8 +173,8 @@ curl -X POST http://127.0.0.1:8001/graph/dict \
 **更新 / 逻辑删除**:
 
 ```bash
-curl -X PUT  http://127.0.0.1:8001/graph/dict/<id> -H "Content-Type: application/json" -d '{"enabled": false}'
-curl -X DELETE http://127.0.0.1:8001/graph/dict/<id>
+curl -X PUT  http://192.168.31.15:8001/graph/dict/<id> -H "Content-Type: application/json" -d '{"enabled": false}'
+curl -X DELETE http://192.168.31.15:8001/graph/dict/<id>
 ```
 
 错误码:`404` 条目不存在、`422` `category` 不是 `entity|relation`。
@@ -246,7 +246,7 @@ GraphRAG 相关(其余 postgres/minio 等复用既有):
 | `kb_id` | UUID | 否 | 知识库 id;不传 = 全库 |
 
 ```bash
-curl -X POST http://127.0.0.1:8001/graph/query \
+curl -X POST http://192.168.31.15:8001/graph/query \
   -H "Content-Type: application/json" \
   -d '{"query": "2.4GHz 的调制方式是什么", "kb_id": "e5a34e83-5b8b-4ad1-bb2d-b91d1e730ca5"}'
 ```
@@ -292,7 +292,7 @@ curl -X POST http://127.0.0.1:8001/graph/query \
 `GET /graph/trace/files?kb_id={uuid}`(`kb_id` 可选,不传 = 全库)
 
 ```bash
-curl "http://127.0.0.1:8001/graph/trace/files?kb_id=e5a34e83-5b8b-4ad1-bb2d-b91d1e730ca5"
+curl "http://192.168.31.15:8001/graph/trace/files?kb_id=e5a34e83-5b8b-4ad1-bb2d-b91d1e730ca5"
 ```
 
 响应:
@@ -342,7 +342,7 @@ curl "http://127.0.0.1:8001/graph/trace/files?kb_id=e5a34e83-5b8b-4ad1-bb2d-b91d
 `GET /graph/segments`(无参,全库;不含正文)
 
 ```bash
-curl http://127.0.0.1:8001/graph/segments
+curl http://192.168.31.15:8001/graph/segments
 ```
 
 响应:
@@ -361,7 +361,7 @@ curl http://127.0.0.1:8001/graph/segments
 `GET /graph/segments/{parent_id}` — 单分段(含正文)。不存在返回 `{"found": false}`(200,非 404)。
 
 ```bash
-curl http://127.0.0.1:8001/graph/segments/8f14e45f-..._1
+curl http://192.168.31.15:8001/graph/segments/8f14e45f-..._1
 ```
 
 ### 7.3 分段开关 `POST /graph/segments/{parent_id}/enabled`
@@ -373,7 +373,7 @@ curl http://127.0.0.1:8001/graph/segments/8f14e45f-..._1
 | `enabled` | bool | 是 | 是否启用该分段(检索时 `enabled=false` 不参与召回) |
 
 ```bash
-curl -X POST http://127.0.0.1:8001/graph/segments/8f14e45f-..._1/enabled \
+curl -X POST http://192.168.31.15:8001/graph/segments/8f14e45f-..._1/enabled \
   -H "Content-Type: application/json" -d '{"enabled": false}'
 ```
 
@@ -406,7 +406,7 @@ curl -X POST http://127.0.0.1:8001/graph/segments/8f14e45f-..._1/enabled \
 | `edited_by` | string | 否 | 编辑人 |
 
 ```bash
-curl -X PUT http://127.0.0.1:8001/graph/segments/8f14e45f-..._1 \
+curl -X PUT http://192.168.31.15:8001/graph/segments/8f14e45f-..._1 \
   -H "Content-Type: application/json" \
   -d '{"content": "# 对空搜索雷达\n工作频率 2.4GHz，调制方式 QPSK。", "edited_by": "ops"}'
 ```
@@ -427,7 +427,7 @@ curl -X PUT http://127.0.0.1:8001/graph/segments/8f14e45f-..._1 \
 `GET /graph/documents/{doc_id}/blocks`—— 给定文件 uuid,返回该文档全部父块(含正文,按章节号数值排序)+ 拼接后的清洗文档(标题行按 `level` 重写回正文)。
 
 ```bash
-curl http://127.0.0.1:8001/graph/documents/8f14e45f-.../blocks
+curl http://192.168.31.15:8001/graph/documents/8f14e45f-.../blocks
 ```
 
 响应:
@@ -464,7 +464,7 @@ curl http://127.0.0.1:8001/graph/documents/8f14e45f-.../blocks
 规则(阈值走 `.env`,见 §4):`R2` 任一文件 > `file_size_mb` MB → offline;`R3` 文件数 > `batch_count` → offline;否则 `R1` realtime。
 
 ```bash
-curl -X POST http://127.0.0.1:8001/graph/route \
+curl -X POST http://192.168.31.15:8001/graph/route \
   -H "Content-Type: application/json" -d '{"sizes": [12582912]}'
 ```
 
@@ -483,7 +483,7 @@ curl -X POST http://127.0.0.1:8001/graph/route \
 `POST /graph/reconcile`(无 body)—— 比对 PG `parent_document` ↔ Neo4j `:Segment` 集合,并统计图内 BINDS 总数。
 
 ```bash
-curl -X POST http://127.0.0.1:8001/graph/reconcile
+curl -X POST http://192.168.31.15:8001/graph/reconcile
 ```
 
 响应:
@@ -522,7 +522,7 @@ mesh = 别名+属性指纹归一消歧、孤儿兜底绑定、元数据派生边
 `GET /graph/metrics`(无参)—— 读 Neo4j 全图(实体/BINDS/关系)+ PG 父块,返回四指标 + 总数 + 孤立实体。
 
 ```bash
-curl http://127.0.0.1:8001/graph/metrics
+curl http://192.168.31.15:8001/graph/metrics
 ```
 
 响应:
@@ -554,7 +554,7 @@ curl http://127.0.0.1:8001/graph/metrics
 `POST /graph/mesh/link-orphans`(无 body)—— 对 `kg_entity_id` 为空的父块,按别名/指纹匹配现有实体做兜底绑定(第二道防线,防孤立星);幂等。
 
 ```bash
-curl -X POST http://127.0.0.1:8001/graph/mesh/link-orphans
+curl -X POST http://192.168.31.15:8001/graph/mesh/link-orphans
 ```
 
 响应:
@@ -580,7 +580,7 @@ curl -X POST http://127.0.0.1:8001/graph/mesh/link-orphans
 `GET /graph/quality`(无参)—— 读 `ingest_quality` 表 + Neo4j 全图,返回四指标 + 健康度 + 漏抽文档清单。让「抽少/抽空」从静默失败变为可见。
 
 ```bash
-curl http://127.0.0.1:8001/graph/quality
+curl http://192.168.31.15:8001/graph/quality
 ```
 
 响应:
@@ -637,9 +637,9 @@ curl http://127.0.0.1:8001/graph/quality
 
 ```bash
 # 预演(只返回归并计划,不落库)
-curl -X POST "http://127.0.0.1:8001/graph/resolve?dry_run=true"
+curl -X POST "http://192.168.31.15:8001/graph/resolve?dry_run=true"
 # 落库执行
-curl -X POST http://127.0.0.1:8001/graph/resolve
+curl -X POST http://192.168.31.15:8001/graph/resolve
 ```
 
 响应:
@@ -742,7 +742,7 @@ IQ/H5 除「信号解析 → 26 特征中文描述入库」(`/parse-iq`,§1.6)�
 | `category` | string | 是 | 人工类别标签(雷达型号/类型);空串 → 422 |
 
 ```bash
-curl -X POST http://127.0.0.1:8001/iq/ingest \
+curl -X POST http://192.168.31.15:8001/iq/ingest \
   -H "Content-Type: application/json" \
   -d '{"doc_id": "8f14e45f-...", "category": "某型对空搜索雷达"}'
 ```
@@ -773,7 +773,7 @@ curl -X POST http://127.0.0.1:8001/iq/ingest \
 | `doc_id` | UUID | 是 | 文档 uuid |
 
 ```bash
-curl -X POST http://127.0.0.1:8001/iq/search \
+curl -X POST http://192.168.31.15:8001/iq/search \
   -H "Content-Type: application/json" \
   -d '{"doc_id": "8f14e45f-..."}'
 ```

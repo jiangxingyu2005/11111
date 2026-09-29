@@ -22,16 +22,16 @@ models:
     dim: 1024                  # BGE-M3 dense 固定 1024；换模型必须同步改 + 重建库
     metric: COSINE
     max_length: 8192
-    backend: hash              # hash | bge_m3
+    backend: bge_m3            # hash | bge_m3
     # 稀疏路：与下面 milvus.sparse.enabled 强联动（启动时校验两者必须一致）
-    sparse_enabled: false      # IF-1 扩 text_sparse 列后，此处与 milvus.sparse.enabled 同改 true
+    sparse_enabled: true       # IF-1 扩 text_sparse 列后，此处与 milvus.sparse.enabled 同改 true
   rerank:
     id: bge-reranker-v2-m3
-    backend: hash              # hash | bge
+    backend: bge               # hash | bge
   llm:
-    id: qwen2.5-14b-instruct   # 生产模型；CPU 链路验证时可用 1.5B~7B 小模型顶替（需显式标注）
-    backend: echo              # echo | openai | hf | generic
-    upstream: ""               # openai 后端的上游地址，空则由 .env 的 LLM_UPSTREAM 提供
+    id: qwen2.5:3b              # ollama 模型名（Q4 量化，CPU 可跑）；生产 GPU 环境换 qwen2.5-14b-instruct
+    backend: openai             # echo | openai | hf | generic（openai=经 ollama 的 /v1 兼容端点）
+    upstream: http://127.0.0.1:11434/v1   # ollama 默认地址，部署时可由 .env 的 LLM_UPSTREAM 覆盖
 
 # ============================================================
 # endpoints —— 怎么连到模型（接入自有模型只改这一块，不用改代码）
@@ -65,8 +65,8 @@ endpoints:
     request: {}                # {query_key, texts_key, model_key, extra}
     response: {}               # {scores}
   llm:
-    url: ""                    # 留空则由 .env 的 LLM_UPSTREAM 提供
-    model: ""
+    url: http://127.0.0.1:11434/v1   # ollama OpenAI 兼容端点；部署时可由 LLM_URL/LLM_UPSTREAM 覆盖
+    model: qwen2.5:3b          # ollama 模型名
     api_key: ""
     headers: {}
     timeout_s: 180
@@ -113,12 +113,12 @@ milvus:
       top_k: 100
       threshold: 0.68        # τ_b：B 路可略低于 A 路，但差距不宜 > 0.1
   sparse:
-    enabled: false             # 2026-09-28 BGE-M3 定案后预留：IF-1 扩 text_sparse 列后改 true 即启用 hybrid
+    enabled: true              # IF-1 已扩 text_sparse 列 + 重跑 seed，启用内层 dense+sparse hybrid
     field: text_sparse
-    metric_type: BM25
+    metric_type: IP            # BGE-M3 lexical_weights 是学习稀疏权重，内积度量；不能用 BM25（BM25 是 Milvus 原生 BM25 Function 输出专属）
     top_k: 100
-    language: zh             # Milvus BM25 分词语言，中文固定为 zh
-    stop_words: []           # 可追加领域停用词，空表表示用默认
+    language: zh             # 占位：仅 Milvus 原生 BM25 Function 需要；学习稀疏(IP)忽略
+    stop_words: []           # 占位：同上
 
 hybrid:
   # 内层 RRF：Milvus 库内融合 dense + sparse
@@ -143,10 +143,10 @@ fusion:
 
 reranker:
   model: bge-reranker-v2-m3
-  device: cuda               # fallback: cpu
+  device: cpu               # 本机 CPU-only（torch+cpu），无 CUDA
   max_length: 512
   batch_size: 16
-  top_k_in: 50
+  top_k_in: 10               # CPU cross-encoder 慢：10 条≈7s，再大击穿预算；够选 top5
   top_k_out: 5               # 最终进入上下文的候选数
   threshold: 0.35            # 重排分数低于此值的候选直接丢弃，防止无关文本进上下文
 
@@ -155,7 +155,8 @@ timeout:
   milvus_hybrid_ms: 800      # 单路最大等待
   neo4j_local_ms: 600
   neo4j_global_ms: 2000
-  reranker_ms: 900
+  reranker_ms: 15000           # CPU cross-encoder 精排 10 条实测 ~6-7s；L2 已串行化到重排后、不再与精排争 CPU，15s 为安全裕量
+  nl2query_ms: 20000          # L2 结构化抽取（CPU 3B 生成 JSON 慢）；L2 与召回并行，此值限总预算
   pg_fetch_ms: 50
 
 graph:
@@ -188,15 +189,15 @@ subgraph:
   edge_limit: 100            # 与 api/subgraph_view.v1.schema.json edges.maxItems=100 对齐
 
 degradation:
-  budget_s: 5.2              # 检索侧可用预算 = 11.5 - LLM预留6.0 - 上下文0.3
+  budget_s: 15.0             # 检索侧(生成前)预算：recall ~1-2s + rerank ~6-7s（L2 已串行化到重排后，不再与嵌入/重排争 CPU）
   cutoffs:
-    - threshold_s: 3.5       # >3.5s 砍重排
+    - threshold_s: 8.0       # >8s 砍重排（recall 正常 2~6s 不触发，避免 hybrid/争用把精排误砍掉）
       level: L3
-    - threshold_s: 4.5       # >4.5s 砍图路（保留本地遍历，砍社区摘要）
+    - threshold_s: 10.0      # >10s 砍图路（保留本地遍历，砍社区摘要）
       level: L2
-    - threshold_s: 5.0       # >5.0s 砍 NL2Query + 稀疏路
+    - threshold_s: 12.0      # >12s 砍 NL2Query + 稀疏路
       level: L1
-    - threshold_s: 5.2       # >5.2s 转 PG 全文兜底
+    - threshold_s: 15.0      # >15s 转 PG 全文兜底
       level: L0
 
 # ─────────────────────────────────────────────────────────────
@@ -213,3 +214,10 @@ dev_overrides:
     reranker.threshold: 0.02
     timeout.milvus_hybrid_ms: 3000
     timeout.neo4j_local_ms: 3000
+  real:
+    # 真实 BGE-M3 余弦量纲校准：query→passage 短问长文，实测 Top1≈0.60~0.66，
+    # 复用契约位 0.72 会把召回杀空。此处只调阈值，不动算法语义（RRF k/top_k/融合结构）
+    milvus.dense.primary.threshold: 0.40
+    milvus.dense.secondary.threshold: 0.40
+    graph.entity_link.threshold: 0.40
+    community.scene_link.threshold: 0.40

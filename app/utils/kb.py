@@ -36,6 +36,24 @@ async def list_kbs(session: AsyncSession) -> list[KnowledgeBase]:
     return list(await session.scalars(stmt))
 
 
+async def list_kbs_page(
+    session: AsyncSession, page: int, page_size: int
+) -> tuple[list[KnowledgeBase], int]:
+    """分页查询未删除知识库(按创建时间升序),返回 (当前页列表, 总条数)。"""
+    where = KnowledgeBase.deleted_at.is_(None)
+    total = await session.scalar(
+        select(func.count()).select_from(KnowledgeBase).where(where)
+    )
+    stmt = (
+        select(KnowledgeBase)
+        .where(where)
+        .order_by(KnowledgeBase.created_at)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    return list(await session.scalars(stmt)), int(total or 0)
+
+
 async def get_kb(session: AsyncSession, kb_id) -> KnowledgeBase | None:
     """按 id 查未删除的记录,不存在或已删除返回 None。"""
     stmt = select(KnowledgeBase).where(

@@ -14,21 +14,21 @@ cp .env.example .env   # 按实际端口改 MINERU_API_BASE_URL
 # 3. 确保 MinerU 容器已启动
 curl http://127.0.0.1:8008/v1/health
 
-# 4. 启动本服务
-uvicorn app.main:app --reload --port 8001
+# 4. 启动本服务(--host 0.0.0.0 监听所有网卡,前端/其他机器才能通过本机 IP 访问)
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8001
 ```
 
 ## 调用示例
 
 ```bash
 # 解析单个文件
-curl -F "files=@sample.pdf" http://127.0.0.1:8001/parse
+curl -F "files=@sample.pdf" http://192.168.31.15:8001/parse
 
 # 只返回落盘路径,不返回正文
-curl -F "files=@sample.pdf" "http://127.0.0.1:8001/parse?return_content=false"
+curl -F "files=@sample.pdf" "http://192.168.31.15:8001/parse?return_content=false"
 
 # 健康检查
-curl http://127.0.0.1:8001/health
+curl http://192.168.31.15:8001/health
 ```
 
 ## 输出

@@ -131,7 +131,7 @@ def embed_fn_factory(mode: str, url: str, dim: int):
     if mode == "service":
         import httpx
         def _fn(texts: list[str]) -> tuple[list[list[float]], list[dict]]:
-            r = httpx.post(url, json={"texts": texts, "type": "doc"}, timeout=120.0)
+            r = httpx.post(url, json={"texts": texts, "type": "doc"}, timeout=1200.0)
             r.raise_for_status()
             embs = r.json()["embeddings"]
             dense = [e["dense"] if isinstance(e, dict) else e for e in embs]

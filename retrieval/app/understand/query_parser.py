@@ -9,12 +9,16 @@ L3 校验器（白名单/量纲区间/区间自洽，本文件已实现核心检
 """
 from __future__ import annotations
 
+import json
+import logging
 import re
 from dataclasses import dataclass, field
 
-from ..config import query_parser_cfg
+from ..config import get_settings, query_parser_cfg
 from ..degrade.codes import DegradedCode
 from ..degrade.orchestrator import DegradedCollector
+
+log = logging.getLogger("retrieval.understand.query_parser")
 
 # L2 output_schema 的 intent 枚举（yaml 里 STRUCTURED_ONLY 与 V2.0 的 PURE_STRUCTURED 同义，统一用后者）
 INTENTS = {"ENTITY_LEVEL", "GLOBAL", "HYBRID", "PURE_STRUCTURED"}
@@ -64,6 +68,7 @@ class ParsedQuery:
     conditions: list[Condition] = field(default_factory=list)
     rewritten: str = ""        # QRY-00 会话改写后的 query（本期单轮直通）
     l1_hit: bool = False
+    l2_needed: bool = False    # L1 未命中 -> 需要异步 L2 抽取（由调用方决定是否触发）
 
 
 _UNIT_TO_BASE = {  # 从 query_parser.yaml unit_convert 摘出的最小实现（字段: {单位串: 倍率}）
@@ -146,25 +151,135 @@ def _l3_validate(conds: list[Condition], collector: DegradedCollector) -> list[C
     return ok
 
 
+def _heuristic_intent(query: str, conds: list[Condition]) -> str:
+    """意图启发式兜底（L2 未接/失败时用）：有条件 + 短问 -> 纯结构化，否则实体级。"""
+    if conds and len(query) <= 40:
+        return "PURE_STRUCTURED"
+    return "ENTITY_LEVEL"
+
+
 def parse(query: str, collector: DegradedCollector) -> ParsedQuery:
-    """三层解析主入口（骨架版：L1+L3 真实，L2 骨架）。"""
+    """三层解析主入口（L1+L3 同步快通道；L2 由调用方异步触发，见 parse_l2）。"""
     pq = ParsedQuery(rewritten=query)
 
     # L1
     conds = _l1_extract(query, collector)
     pq.l1_hit = bool(conds)
-
-    # L2（骨架）：L1 未命中且有 LLM 端点时才调；本期未部署 -> 记降级继续
-    if not pq.l1_hit:
-        # TODO(M-Q2): 接 vLLM function calling（复用 qingxi llm.py 的调用模式，非检索逻辑）
-        collector.record(DegradedCode.NL2QUERY_LLM_TIMEOUT, "L2 not deployed (skeleton)", "understand")
+    pq.l2_needed = not pq.l1_hit
 
     # L3
     pq.conditions = _l3_validate(conds, collector)
-
-    # 意图初判（骨架启发式；正式版由 L2 输出）
-    if pq.conditions and len(query) <= 40:
-        pq.intent = "PURE_STRUCTURED"
-    else:
-        pq.intent = "ENTITY_LEVEL"
+    pq.intent = _heuristic_intent(query, pq.conditions)
     return pq
+
+
+# L2 的 LLM 请求超时（CPU 3B 模型生成 JSON 慢，给足；真正 deadline 由调用方 wait_for 兜底）
+_L2_TIMEOUT_S = 25.0
+
+
+def _build_l2_messages(query: str) -> list[dict]:
+    """按 config/query_parser.yaml 的 l2_llm.output_schema + hard_rules 拼 prompt。
+
+    3B 小模型对"只描述 schema"的遵循很差（会自作主张输出 {rf:[...]} 这种平铺格式），
+    必须给一个【具体示例】让它照着抄格式。示例的字段/取值都在 schema 枚举内。
+    """
+    cfg = query_parser_cfg()
+    l2 = cfg.get("l2_llm") or {}
+    props = (l2.get("output_schema") or {}).get("properties") or {}
+    cond_props = (props.get("conditions") or {}).get("items") or {} or {}
+    cond_props = cond_props.get("properties") or {}
+    field_enum = (cond_props.get("field") or {}).get("enum", [])
+    op_enum = (cond_props.get("op") or {}).get("enum", [])
+    bands = cfg.get("band_table") or []
+    band_lines = "\n".join(
+        f"  {', '.join(b.get('alias', []))} → [{b['rf_ghz'][0]}, {b['rf_ghz'][1]}]"
+        for b in bands)
+    hard = "\n".join(f"{i}. {r}" for i, r in enumerate(l2.get("hard_rules") or [], 1))
+    system = (
+        "你是电磁信号侦察领域的查询理解助手，把用户问题解析成结构化检索条件，"
+        "只输出一个合法 JSON 对象，不要任何解释文字或 markdown 代码块。\n"
+        f"字段 field 取值：{', '.join(field_enum)}（rf载频GHz / pw脉宽us / prf重频Hz / "
+        f"doa方位deg / toa时间 / snr信噪比dB / modulation调制 / platform_type平台 / country国家）\n"
+        f"算子 op 取值：{', '.join(op_enum)}（range→[min,max] 区间；point→单值；eq→枚举字面值）\n"
+        f"波段展开表（命中波段必须输出 range 区间，禁止中心频点）：\n{band_lines}\n"
+        "硬性规则：\n" + hard + "\n"
+        "输出格式示例（严格照抄这个结构）：\n"
+        '用户问题「X波段的舰载雷达」→ '
+        '{"intent":"ENTITY_LEVEL","conditions":[{"field":"rf","op":"range","value":[8.0,12.0],'
+        '"unit":"GHz","raw":"X波段","confidence":0.9}]}\n'
+        "若用户没提任何参数，conditions 为空数组 []。"
+    )
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": f"用户问题：{query}"}]
+
+
+def _extract_json(text: str) -> dict | None:
+    """从模型输出里鲁棒提取 JSON（容忍首尾多余文字 / ```json 围栏）。"""
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.lstrip("`")
+        nl = t.find("\n")
+        if nl != -1 and t[:nl].strip().lower() in ("json",):
+            t = t[nl + 1:]
+    start, end = t.find("{"), t.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        return json.loads(t[start:end + 1])
+    except ValueError:
+        return None
+
+
+def _conditions_from_json(items: list, collector: DegradedCollector) -> list[Condition]:
+    """L2 输出的 conditions[] -> Condition 列表，并经 L3 校验器兜底（抽风输出直接丢弃）。"""
+    conds: list[Condition] = []
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        fld, op, val = it.get("field"), it.get("op"), it.get("value")
+        if fld is None or op is None or val is None:
+            continue
+        try:
+            conf = float(it.get("confidence", 0.8))
+        except (TypeError, ValueError):
+            conf = 0.8
+        conds.append(Condition(field=str(fld), op=str(op), value=val,
+                               confidence=conf, raw=str(it.get("raw", ""))[:32],
+                               strength="soft"))
+    return _l3_validate(conds, collector)
+
+
+async def parse_l2(query: str, collector: DegradedCollector) -> ParsedQuery | None:
+    """L2 真实现：调本地 LLM 抽取结构化条件。任何失败/超时 -> 记降级并返回 None（只用 L1）。"""
+    s = get_settings()
+    if not s.graphrag_llm_base_url:
+        collector.record(DegradedCode.NL2QUERY_LLM_TIMEOUT,
+                         "L2 endpoint not configured", "understand")
+        return None
+    try:
+        import httpx
+        messages = _build_l2_messages(query)
+        url = s.graphrag_llm_base_url.rstrip("/") + "/chat/completions"
+        async with httpx.AsyncClient(timeout=_L2_TIMEOUT_S) as cli:
+            r = await cli.post(
+                url, headers={"Authorization": f"Bearer {s.graphrag_llm_api_key}"},
+                json={"model": s.graphrag_llm_model, "messages": messages,
+                      "stream": False, "temperature": 0.0})
+            r.raise_for_status()
+            content = ((r.json().get("choices") or [{}])[0].get("message") or {}).get("content", "")
+        data = _extract_json(content)
+        if not data:
+            collector.record(DegradedCode.NL2QUERY_LLM_TIMEOUT,
+                             f"L2 non-JSON output: {content[:80]!r}", "understand")
+            return None
+        conds = _conditions_from_json(data.get("conditions") or [], collector)
+        pq = ParsedQuery(rewritten=query, l1_hit=False, l2_needed=False)
+        pq.conditions = conds
+        intent = str(data.get("intent", "")).upper()
+        pq.intent = ("PURE_STRUCTURED" if intent == "STRUCTURED_ONLY"
+                     else (intent if intent in INTENTS else _heuristic_intent(query, conds)))
+        return pq
+    except Exception as e:
+        log.warning("L2 nl2query failed: %s", e)
+        collector.record(DegradedCode.NL2QUERY_LLM_TIMEOUT, str(e)[:200], "understand")
+        return None

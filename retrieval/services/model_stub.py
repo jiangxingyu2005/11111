@@ -350,6 +350,18 @@ def main() -> int:
         log.warning("embed=hash：链路可跑但无语义能力，验收/评测前必须切真模型")
     if LLM_BACKEND == "echo":
         log.warning("llm=echo：报告为模板文本并已显式标注，非模型输出")
+
+    # 预热本地模型：CPU 加载权重要 10s+，首请求会击穿调用方超时。
+    # 提前加载进进程级缓存，避免首查退化为 RRF 序（rerank）或超时返空（embed）。
+    for kind, warm in (("embed", lambda: ep._local(["预热"], "query")),
+                       ("rerank", lambda: rp._local("预热", ["预热文本"])),
+                       ("llm", lp.warm)):
+        try:
+            warm()
+            log.info("warmed %s model: %s", kind,
+                     ep.model_id if kind == "embed" else (rp.model_id if kind == "rerank" else lp.model_id))
+        except Exception as e:
+            log.warning("warmup %s model failed: %s", kind, e)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0
 
