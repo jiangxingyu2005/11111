@@ -5,15 +5,17 @@
   - 绝不改变召回序 / 过滤 / 提权（这些副作用留给未来④路标量约束，规则不碰）。
   - LLM 只拿 rule_hits 当参考事实去"翻译/解释/下结论"，规则命中与否由代码确定，可复现。
   - fail-closed：规则读取失败、条件取不到值、空条件——一律不触发，绝不影响检索主链路。
-  - fake 后端无 PG，直接返回空（无规则 = 无规则标记，属稳态而非降级，故不留 degraded）。
+  - fake 后端无 PG，改读 seed/rules.json（与真库同构）；读不到就当无规则（稳态而非降级，故不留 degraded）。
 
 条件 DSL 见 docs/api/10-rules.md：condition = {all:[子句], any:[子句]}，子句 = {field, op, value}。
 """
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 
-from ..config import effective_cfg, get_settings
+from ..config import ROOT, effective_cfg, get_settings
 from ..degrade.orchestrator import DegradedCollector
 from .rrf import Hit
 
@@ -25,15 +27,49 @@ NUM_OPS = {"lt", "lte", "gt", "gte", "eq", "ne"}
 STR_OPS = {"eq", "ne", "contains"}
 
 
+def _normalize_rule(r: dict) -> dict:
+    """把存储层的一条规则规范成引擎消费的 dict（real 与 fake 共用同一形状）。"""
+    return {
+        "id": r.get("id", ""),
+        "name": r.get("name", ""),
+        "description": r.get("description") or "",
+        "condition": r.get("condition") if isinstance(r.get("condition"), dict) else {},
+        "action": r.get("action") if isinstance(r.get("action"), dict) else {},
+        "priority": int(r.get("priority") or 0),
+        "kb_id": str(r.get("kb_id")) if r.get("kb_id") is not None else None,
+    }
+
+
+def _load_fake_rules() -> list[dict]:
+    """fake 后端：从 seed/rules.json 读预设规则（镜像 FakeStore._read），无 PG 也能跑通规则链路。
+
+    rules.json 缺失/损坏 -> 返回空（无规则 = 稳态），与 real 读库失败同一 fail-closed 语义。
+    """
+    seed_dir = Path(get_settings().retrieval_seed_dir)
+    if not seed_dir.is_absolute():
+        seed_dir = ROOT / seed_dir
+    path = seed_dir / "rules.json"
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        log.warning("fake rules load failed (视为无规则): %s", e)
+        return []
+    if not isinstance(data, list):
+        return []
+    return [_normalize_rule(r) for r in data if isinstance(r, dict)]
+
+
 async def load_rules(collector: DegradedCollector) -> list[dict]:
-    """读取启用且未删除的规则（real=asyncpg 现查 rules 表；fake=空，fail-closed）。
+    """读取启用且未删除的规则（real=asyncpg 现查 rules 表；fake=读 seed/rules.json，fail-closed）。
 
     规则增删改即时生效：每次请求现查，无缓存。
     读取失败只记 warning、返回空——规则是可选增强层，读不到就当"本查询无规则"，
     绝不拖累主链（故不新增 degraded 码，避免污染检索响应契约的 step 枚举）。
     """
     if effective_cfg().get("_backend") == "fake":
-        return []
+        return _load_fake_rules()
     try:
         import asyncpg
         conn = await asyncpg.connect(get_settings().pg_dsn)
@@ -48,18 +84,7 @@ async def load_rules(collector: DegradedCollector) -> list[dict]:
             )
         finally:
             await conn.close()
-        out: list[dict] = []
-        for r in rows:
-            out.append({
-                "id": r["id"],
-                "name": r["name"],
-                "description": r["description"] or "",
-                "condition": r["condition"] if isinstance(r["condition"], dict) else {},
-                "action": r["action"] if isinstance(r["action"], dict) else {},
-                "priority": int(r["priority"] or 0),
-                "kb_id": str(r["kb_id"]) if r["kb_id"] is not None else None,
-            })
-        return out
+        return [_normalize_rule(dict(r)) for r in rows]
     except Exception as e:
         log.warning("rules load failed (视为无规则): %s", e)
         return []
@@ -86,6 +111,15 @@ def _resolve(hit: Hit, parents: dict[str, dict], field: str):
 def _cmp(value, op: str, target) -> bool:
     if value is None:
         return False  # fail-closed：字段取不到值恒不满足
+    # eq/ne 对 number/string 均适用（见 docs/api/10-rules.md）：
+    # 先试数值比较，数值化失败则回退字符串比较——kb_id/section/content 等字符串字段的
+    # eq/ne 依赖此回退（否则被 NUM 分支的 float() 误判为恒不满足）。
+    if op in {"eq", "ne"}:
+        try:
+            eq = float(value) == float(target)
+        except (TypeError, ValueError):
+            eq = str(value) == str(target)
+        return eq if op == "eq" else not eq
     if op in NUM_OPS:
         try:
             a, b = float(value), float(target)
@@ -93,11 +127,10 @@ def _cmp(value, op: str, target) -> bool:
             return False
         return {
             "lt": a < b, "lte": a <= b, "gt": a > b, "gte": a >= b,
-            "eq": a == b, "ne": a != b,
         }[op]
     if op in STR_OPS:
         s, t = str(value), str(target)
-        return {"eq": s == t, "ne": s != t, "contains": t in s}[op]
+        return {"contains": t in s}[op]
     return False
 
 

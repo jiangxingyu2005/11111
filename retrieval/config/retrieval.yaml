@@ -188,6 +188,26 @@ subgraph:
   node_limit: 50
   edge_limit: 100            # 与 api/subgraph_view.v1.schema.json edges.maxItems=100 对齐
 
+# ============================================================
+# 记忆管理（多人隔离 + 会话多轮 + 压缩 + mem0 长期事实）
+# ------------------------------------------------------------
+# 算法参数以 yaml 为准（遵守「算法参数以 yaml 为准」纪律）；
+# 总开关/身份模式/密钥走 env（MEMORY_ENABLED / MEMORY_AUTH_MODE / MEMORY_JWT_SECRET）。
+# 默认 enabled=false：现有部署与既有用例行为不变。
+# ============================================================
+memory:
+  enabled: false              # 总开关（与 env MEMORY_ENABLED 联动，默认关）
+  window_size: 10             # 窗口保留消息条数（≈5 轮 × 2）
+  budget_tokens: 4096         # 记忆区预算（摘要+窗口估算 token 上限）
+  trigger_ratio: 0.8          # 记忆区占用 ≥ 预算 × 0.8 触发压缩（不按条数）
+  max_compressions: 5         # 压缩次数上限，压满后只留最新 window_size 条原文
+  summary_target_ratio: 0.4   # 压缩后目标占用比例（预留）
+  mem0:
+    vector_store: milvus      # 自托管 AsyncMemory + Milvus（复用 milvus_uri）
+    collection: mem0_memory
+    # embedding 本地化：huggingface provider 进程内跑 graphrag_embedding_model（BAAI/bge-m3，1024 维），
+    # 与离线 qingxi 侧同模型同空间、零外联。需装 sentence-transformers（体积大，见 requirements.txt 说明）。
+
 degradation:
   budget_s: 5.2              # 检索侧可用预算 = 11.5 - LLM预留6.0 - 上下文0.3
   cutoffs:

@@ -19,6 +19,7 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from ..auth import resolve_user_id
 from ..config import effective_cfg, get_settings
 from ..degrade.codes import DegradedCode
 from ..degrade.orchestrator import BudgetWatchdog, DegradedCollector
@@ -28,6 +29,7 @@ from ..fuse.rrf import rrf_fuse
 from ..fuse.rules import evaluate_rules, load_rules
 from ..generate.report import stream_report
 from ..graph.expand import focus_entities
+from ..memory import service as memory_service
 from ..recall import bm25_route, community_route, graph_route, vector_route
 from ..trace.spans import TraceRecorder, bind_trace, new_trace_id
 from ..understand.query_parser import parse, parse_l2
@@ -40,8 +42,9 @@ CONTRACT_VERSION = "1.0"
 class RetrievalRequest(BaseModel):
     query: str = Field(min_length=1)
     scope: list[str] = Field(min_length=1)   # R4：必填无默认值（权限从第一行代码就是硬约束）
-    session_id: str | None = None            # QRY-00 会话（本期单轮直通）
+    session_id: str | None = None            # QRY-00 会话（记忆管理按此隔离会话）
     eval_mode: bool = False                  # EV-1/EV-5：评测模式（不写缓存/不计被引）
+    token: str | None = None                 # 记忆身份令牌：resolve_user_id 解析出 user_id（缺省则跳过记忆）
 
 
 def _sse(event: str, data: dict) -> str:
@@ -58,6 +61,9 @@ async def retrieval(req: RetrievalRequest) -> StreamingResponse:
         t_start = time.monotonic()
         timings: dict[str, int] = {}
         first_token_at: float | None = None
+
+        # ── 记忆身份：前端 token -> user_id（fail-closed，解析失败=本轮跳过记忆）──
+        user_id = resolve_user_id(req.token)
 
         yield _sse("meta", {"contract_version": CONTRACT_VERSION, "trace_id": trace_id,
                             "eval_mode": req.eval_mode})
@@ -233,15 +239,26 @@ async def retrieval(req: RetrievalRequest) -> StreamingResponse:
             }
 
             # ── RPT 流式生成（LLM 熔断 -> 无 token，done 带降级）──
+            # 记忆读侧：装载三层上下文（fail-closed，失败返回空不影响主链）
+            ctx = await memory_service.load_context(
+                user_id or "", req.session_id or "", req.query)
             span = tracer.start("generate")
-            async for tok in stream_report(req.query, top, parents, collector, rule_hits):
+            answer_parts: list[str] = []
+            async for tok in stream_report(req.query, top, parents, collector, rule_hits,
+                                           ctx["memories"], ctx["summary"], ctx["window"]):
                 if tok:
+                    answer_parts.append(tok)
                     if first_token_at is None:
                         first_token_at = time.monotonic()
                         timings["first_token_ms"] = int((first_token_at - t_start) * 1000)
                     yield _sse("token", {"text": tok})
             span.degraded_codes = collector.codes()
             span.close()
+
+            # ── 记忆写侧（fire-and-forget：append 本轮 -> 压缩，不阻塞 done）──
+            if user_id:
+                memory_service.spawn_background(memory_service.commit_turn(
+                    user_id, req.session_id or "", req.query, "".join(answer_parts)))
 
             timings["total_ms"] = int((time.monotonic() - t_start) * 1000)
             # budget_level 必须取【检索段】的最终档位，不能在生成后再 current_level()——
