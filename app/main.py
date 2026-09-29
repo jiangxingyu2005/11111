@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from .api import documents, graph, iq, knowledge_bases, mesh, parse, seg
+from .api import documents, graph, iq, knowledge_bases, mesh, neo4j, parse, seg
 from .config import settings
 from .utils.database import SessionLocal, init_db
 
@@ -74,4 +74,5 @@ app.include_router(documents.router)
 app.include_router(graph.router)
 app.include_router(seg.router)
 app.include_router(mesh.router)
+app.include_router(neo4j.router)
 app.include_router(iq.router)

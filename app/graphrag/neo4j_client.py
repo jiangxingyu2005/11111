@@ -237,6 +237,207 @@ class Neo4jClient:
             "type(r) AS rel_type"
         )
 
+    # ---- 直接查询/管理(供 /graph 下的 Neo4j 查询与修改接口) ----
+    async def list_entity_nodes(self, name: Optional[str] = None,
+                                entity_type: Optional[str] = None,
+                                kb_id: Optional[str] = None,
+                                limit: Optional[int] = None,
+                                offset: int = 0) -> list[dict]:
+        """列出实体节点(轻量:id/name/type/aliases/confidence)。
+
+        kb_id 传入时仅返回绑定到该库 :Segment 的实体(实体全局共享、不分知识库,
+        归属靠 BINDS 边关联的 Segment.kb_id 判定)。
+        """
+        cypher = "MATCH (e:Entity)"
+        clauses: list[str] = []
+        params: dict = {}
+        if name:
+            clauses.append("(e.name CONTAINS $name OR $name IN e.aliases)")
+            params["name"] = name
+        if entity_type:
+            clauses.append("e.entity_type = $entity_type")
+            params["entity_type"] = entity_type
+        if kb_id:
+            clauses.append("EXISTS { MATCH (e)-[:BINDS]->(s:Segment {kb_id: $kb_id}) }")
+            params["kb_id"] = str(kb_id)
+        if clauses:
+            cypher += " WHERE " + " AND ".join(clauses)
+        cypher += (" RETURN e.entity_id AS entity_id, e.name AS name, "
+                   "e.entity_type AS entity_type, e.aliases AS aliases, "
+                   "e.confidence AS confidence ORDER BY e.name")
+        if limit is not None:
+            cypher += f" SKIP {int(offset)} LIMIT {int(limit)}"
+        return await self.run(cypher, **params)
+
+    async def get_entity_node(self, entity_id: str) -> Optional[dict]:
+        """按 entity_id 取单个实体节点(含 properties,JSON 字符串未还原)。"""
+        rows = await self.run(
+            "MATCH (e:Entity {entity_id: $entity_id}) "
+            "RETURN e.entity_id AS entity_id, e.name AS name, "
+            "e.entity_type AS entity_type, e.aliases AS aliases, "
+            "e.properties AS properties, e.confidence AS confidence",
+            entity_id=entity_id,
+        )
+        return rows[0] if rows else None
+
+    async def list_segment_nodes(self, kb_id: Optional[str] = None,
+                                 doc_id: Optional[str] = None,
+                                 limit: Optional[int] = None,
+                                 offset: int = 0) -> list[dict]:
+        """列出 :Segment 父块节点(Neo4j 侧,区别于 PG parent_document)。"""
+        cypher = "MATCH (s:Segment)"
+        clauses: list[str] = []
+        params: dict = {}
+        if kb_id:
+            clauses.append("s.kb_id = $kb_id")
+            params["kb_id"] = str(kb_id)
+        if doc_id:
+            clauses.append("s.doc_id = $doc_id")
+            params["doc_id"] = doc_id
+        if clauses:
+            cypher += " WHERE " + " AND ".join(clauses)
+        cypher += (" RETURN s.parent_id AS parent_id, s.doc_id AS doc_id, "
+                   "s.kb_id AS kb_id, s.title AS title, s.enabled AS enabled, "
+                   "s.chapter_no AS chapter_no ORDER BY s.parent_id")
+        if limit is not None:
+            cypher += f" SKIP {int(offset)} LIMIT {int(limit)}"
+        return await self.run(cypher, **params)
+
+    async def get_segment_node(self, parent_id: str) -> Optional[dict]:
+        rows = await self.run(
+            "MATCH (s:Segment {parent_id: $parent_id}) "
+            "RETURN s.parent_id AS parent_id, s.doc_id AS doc_id, "
+            "s.kb_id AS kb_id, s.title AS title, s.enabled AS enabled, "
+            "s.chapter_no AS chapter_no",
+            parent_id=parent_id,
+        )
+        return rows[0] if rows else None
+
+    async def list_relations_full(self, rel_type: Optional[str] = None,
+                                  kb_id: Optional[str] = None,
+                                  head_entity_id: Optional[str] = None,
+                                  tail_entity_id: Optional[str] = None,
+                                  limit: Optional[int] = None,
+                                  offset: int = 0) -> list[dict]:
+        """列出关系边(非 BINDS)全字段。kb_id 按 source_parent_id 归属该库 Segment 过滤。"""
+        clauses: list[str] = []
+        params: dict = {}
+        if rel_type:
+            clauses.append("type(r) = $rel_type")
+            params["rel_type"] = rel_type
+        if head_entity_id:
+            clauses.append("a.entity_id = $head")
+            params["head"] = head_entity_id
+        if tail_entity_id:
+            clauses.append("b.entity_id = $tail")
+            params["tail"] = tail_entity_id
+        if kb_id:
+            seg_rows = await self.run(
+                "MATCH (s:Segment {kb_id: $kb_id}) RETURN s.parent_id AS parent_id",
+                kb_id=str(kb_id))
+            parent_ids = [r["parent_id"] for r in seg_rows]
+            if not parent_ids:
+                return []
+            clauses.append("r.source_parent_id IN $parent_ids")
+            params["parent_ids"] = parent_ids
+        cypher = "MATCH (a:Entity)-[r]->(b:Entity) WHERE type(r) <> 'BINDS'"
+        if clauses:
+            cypher += " AND " + " AND ".join(clauses)
+        cypher += (" RETURN a.entity_id AS head_entity_id, b.entity_id AS tail_entity_id, "
+                   "type(r) AS rel_type, r.confidence AS confidence, r.evidence AS evidence, "
+                   "r.source_parent_id AS source_parent_id, r.derived AS derived")
+        if limit is not None:
+            cypher += f" SKIP {int(offset)} LIMIT {int(limit)}"
+        return await self.run(cypher, **params)
+
+    async def list_binds_full(self, kb_id: Optional[str] = None,
+                              entity_id: Optional[str] = None,
+                              parent_id: Optional[str] = None,
+                              limit: Optional[int] = None,
+                              offset: int = 0) -> list[dict]:
+        """列出 BINDS 边(含 kg_role/kg_confidence),可按库/实体/父块过滤。"""
+        clauses: list[str] = []
+        params: dict = {}
+        if kb_id:
+            clauses.append("s.kb_id = $kb_id")
+            params["kb_id"] = str(kb_id)
+        if entity_id:
+            clauses.append("e.entity_id = $entity_id")
+            params["entity_id"] = entity_id
+        if parent_id:
+            clauses.append("s.parent_id = $parent_id")
+            params["parent_id"] = parent_id
+        cypher = "MATCH (e:Entity)-[b:BINDS]->(s:Segment)"
+        if clauses:
+            cypher += " WHERE " + " AND ".join(clauses)
+        cypher += (" RETURN e.entity_id AS entity_id, s.parent_id AS parent_id, "
+                   "b.kg_role AS kg_role, b.kg_confidence AS kg_confidence")
+        if limit is not None:
+            cypher += f" SKIP {int(offset)} LIMIT {int(limit)}"
+        return await self.run(cypher, **params)
+
+    async def update_entity(self, entity_id: str, fields: dict) -> None:
+        """部分更新实体节点(仅更新传入字段;properties 落库前序列化为 JSON 字符串)。"""
+        allowed = {"name", "entity_type", "aliases", "properties", "confidence"}
+        setters: list[str] = []
+        params: dict = {"entity_id": entity_id}
+        for k, v in fields.items():
+            if k not in allowed:
+                continue
+            if k == "properties" and not isinstance(v, str):
+                v = json.dumps(v, ensure_ascii=False)
+            setters.append(f"e.{k} = ${k}")
+            params[k] = v
+        if not setters:
+            return
+        await self.run(
+            f"MATCH (e:Entity {{entity_id: $entity_id}}) SET {', '.join(setters)}",
+            **params)
+
+    async def update_segment(self, parent_id: str, fields: dict) -> None:
+        """部分更新 :Segment 节点(仅更新传入字段)。"""
+        allowed = {"doc_id", "kb_id", "title", "enabled", "chapter_no"}
+        setters: list[str] = []
+        params: dict = {"parent_id": parent_id}
+        for k, v in fields.items():
+            if k not in allowed:
+                continue
+            if k == "kb_id" and v is not None:
+                v = str(v)
+            setters.append(f"s.{k} = ${k}")
+            params[k] = v
+        if not setters:
+            return
+        await self.run(
+            f"MATCH (s:Segment {{parent_id: $parent_id}}) SET {', '.join(setters)}",
+            **params)
+
+    async def delete_relation(self, head_entity_id: str, tail_entity_id: str,
+                              rel_type: str) -> None:
+        """删除指定 (head, tail, rel_type) 的关系边。rel_type 须是合法 Cypher 关系标识。"""
+        await self.run(
+            f"MATCH (a:Entity {{entity_id: $head}})-[r:{rel_type}]->"
+            f"(b:Entity {{entity_id: $tail}}) DELETE r",
+            head=head_entity_id, tail=tail_entity_id)
+
+    async def entity_relations(self, entity_id: str) -> list[dict]:
+        """实体的一跳关系边(含方向/类型/对端实体名+类型),BINDS 除外。
+
+        供关系型查询「看图答」:把命中的实体在图中直接相连的边作为事实喂给 LLM,
+        即便对端实体是孤儿(无 BINDS 内容)也能给出「X 有哪些 Y」的结构化答案。
+        """
+        out = await self.run(
+            "MATCH (a:Entity {entity_id: $id})-[r]->(b:Entity) WHERE type(r) <> 'BINDS' "
+            "RETURN 'out' AS dir, type(r) AS rel_type, b.entity_id AS target_id, "
+            "b.name AS target_name, b.entity_type AS target_type",
+            id=entity_id)
+        inn = await self.run(
+            "MATCH (b:Entity)-[r]->(a:Entity {entity_id: $id}) WHERE type(r) <> 'BINDS' "
+            "RETURN 'in' AS dir, type(r) AS rel_type, b.entity_id AS target_id, "
+            "b.name AS target_name, b.entity_type AS target_type",
+            id=entity_id)
+        return out + inn
+
     # ---- 图扩展 ----
     async def expand(self, entity_ids: list, depth: int) -> list[dict]:
         if not entity_ids:
@@ -246,8 +447,8 @@ class Neo4jClient:
         return await self.run(
             f"MATCH p=(a:Entity)-[*1..{depth}]-(b:Entity) "
             "WHERE a.entity_id IN $ids "
-            "RETURN DISTINCT b.entity_id AS entity_id, b.name AS name, "
-            "b.entity_type AS entity_type, length(p) AS hops",
+            "RETURN b.entity_id AS entity_id, b.name AS name, "
+            "b.entity_type AS entity_type, min(length(p)) AS hops",
             ids=list(entity_ids),
         )
 
