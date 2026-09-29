@@ -17,6 +17,7 @@ qingxi 服务全部 HTTP 接口,按类别拆分到本目录各文件。Base URL 
 | 路由与对账 | [07-graph-route-reconcile.md](07-graph-route-reconcile.md) |
 | 图质量与消歧 | [08-graph-metrics-resolve.md](08-graph-metrics-resolve.md) |
 | IQ 检索库 | [09-iq.md](09-iq.md) |
+| Neo4j 图查询/管理 | [10-graph-neo4j.md](10-graph-neo4j.md) |
 
 ## 端点总览
 
@@ -24,14 +25,15 @@ qingxi 服务全部 HTTP 接口,按类别拆分到本目录各文件。Base URL 
 |---|---|---|
 | 清洗解析 | `/parse` `/parse-image` `/parse-audio` `/parse-video` `/parse-html` `/parse-iq` | POST |
 | 健康检查 | `/health` | GET |
-| 知识库管理 | `/knowledge-bases` `/knowledge-bases/{kb_id}` | POST/GET/PUT/DELETE |
+| 知识库管理 | `/knowledge-bases` `/knowledge-bases/{kb_id}` `/knowledge-bases/{kb_id}/documents` | POST/GET/PUT/DELETE |
 | 文档下载 | `/documents/{doc_id}/download` `/documents/{doc_id}/desensitize` | GET |
 | 抽取字典 | `/graph/dict` `/graph/dict/{dict_id}` | POST/GET/PUT/DELETE |
-| 在线查询与溯源 | `/graph/query` `/graph/trace/files` `/graph/trace/files/{doc_id}` `/graph/trace/files/{doc_id}/locate` | POST/GET |
+| 在线查询与溯源 | `/graph/query` `/graph/query/stream` `/graph/trace/files` `/graph/trace/files/{doc_id}` `/graph/trace/files/{doc_id}/locate` | POST/GET |
 | 分段管理 | `/graph/segments` `/graph/segments/{parent_id}` `/graph/segments/{parent_id}/enabled` `/graph/documents/{doc_id}/enabled` `/graph/documents/{doc_id}/blocks` | GET/POST/PUT |
 | 路由与对账 | `/graph/route` `/graph/reconcile` | POST |
 | 图质量与消歧 | `/graph/metrics` `/graph/quality` `/graph/mesh/link-orphans` `/graph/resolve` | GET/POST |
 | IQ 检索库 | `/iq/ingest` `/iq/search` | POST |
+| Neo4j 图查询/管理 | `/graph/nodes` `/graph/entities` `/graph/entities/{entity_id}` `/graph/nodes/segments` `/graph/nodes/segments/{parent_id}` `/graph/relations` `/graph/binds` | GET/POST/PUT/DELETE |
 
 ## 通用约定
 

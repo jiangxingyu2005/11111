@@ -113,6 +113,17 @@ class KnowledgeBaseUpdate(BaseModel):
     description: Optional[str] = None
 
 
+class DocumentRead(BaseModel):
+    """知识库文件表条目:文件名 + 源文件大小(MinIO) + 登记时间。"""
+    doc_id: str
+    filename: str
+    size: Optional[int] = None       # 源文件大小(字节),MinIO 缺失时 null
+    score: Optional[float] = None    # 文件质量分
+    in_kb: bool = False              # 是否已入图谱/知识库
+    created_at: datetime
+    updated_at: datetime
+
+
 class ExtractionDictCreate(BaseModel):
     """新建抽取字典条目(category=entity 节点 / relation 关系)。"""
     name: str

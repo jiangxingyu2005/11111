@@ -5,9 +5,15 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
-from ..schemas import KnowledgeBaseCreate, KnowledgeBaseRead, KnowledgeBaseUpdate
-from ..utils import kb
+from ..schemas import (
+    DocumentRead,
+    KnowledgeBaseCreate,
+    KnowledgeBaseRead,
+    KnowledgeBaseUpdate,
+)
+from ..utils import document, kb, minio_client
 from ..utils.database import get_db
 
 router = APIRouter(prefix="/knowledge-bases", tags=["knowledge-bases"])
@@ -48,6 +54,29 @@ async def get_kb(kb_id: UUID, db: AsyncSession = Depends(get_db)) -> KnowledgeBa
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="知识库不存在")
     return row
+
+
+@router.get("/{kb_id}/documents", response_model=list[DocumentRead])
+async def list_kb_documents(kb_id: UUID, db: AsyncSession = Depends(get_db)) -> list[DocumentRead]:
+    """知识库文件表:文件名 + 源文件大小(MinIO) + 登记时间等(不含逻辑删除)。"""
+    if await kb.get_kb(db, kb_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="知识库不存在")
+
+    docs = await document.list_documents(db, kb_id)
+    sizes = await run_in_threadpool(minio_client.list_source_sizes, kb_id)
+
+    return [
+        DocumentRead(
+            doc_id=str(d.id),
+            filename=d.filename,
+            size=sizes.get(str(d.id)),
+            score=d.score,
+            in_kb=d.in_kb,
+            created_at=d.created_at,
+            updated_at=d.updated_at,
+        )
+        for d in docs
+    ]
 
 
 @router.put("/{kb_id}", response_model=KnowledgeBaseRead)

@@ -83,6 +83,47 @@
 
 **响应示例**：同单个对象；不存在 → 404。
 
+## `GET /knowledge-bases/{kb_id}/documents` — 知识库文件表
+
+返回该知识库下的全部文件：文件名、源文件大小、登记时间等（不含逻辑删除）。
+
+**URL**：`GET http://192.168.31.15:8001/knowledge-bases/{kb_id}/documents`
+
+**请求数据**（路径参数）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `kb_id` | UUID | 是 | 知识库 id |
+
+**请求示例**：`GET http://192.168.31.15:8001/knowledge-bases/2db770f2-7a09-4f04-9f07-fce5e6bf6529/documents`
+
+**响应示例**（`DocumentRead[]`）：
+
+```json
+[
+  {
+    "doc_id": "8f14e45f-...",
+    "filename": "sample.pdf",
+    "size": 2849136,
+    "score": 0.82,
+    "in_kb": true,
+    "created_at": "2026-09-28T07:20:11.123456Z",
+    "updated_at": "2026-09-28T07:20:11.123456Z"
+  }
+]
+```
+
+| 字段 | 说明 |
+|---|---|
+| `doc_id` | 文档 id（UUID） |
+| `filename` | 原始文件名 |
+| `size` | 源文件大小（字节），从 MinIO 读取；源文件缺失时为 `null` |
+| `score` | 文件质量分（0~1） |
+| `in_kb` | 是否已入图谱/知识库 |
+| `created_at` / `updated_at` | 登记 / 更新时间 |
+
+不存在该知识库 → 404。
+
 ## `PUT /knowledge-bases/{kb_id}` — 更新
 
 **URL**：`PUT http://192.168.31.15:8001/knowledge-bases/{kb_id}`

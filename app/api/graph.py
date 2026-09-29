@@ -4,9 +4,12 @@
 抽取侧每次现查,改字典即时生效。逻辑删除(置 deleted_at)后不参与抽取。
 """
 
+import asyncio
+import json
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -142,6 +145,95 @@ async def graph_query(payload: GraphQueryRequest, db: AsyncSession = Depends(get
             detail=f"图谱查询失败: {e}",
         )
     return result
+
+
+@router.post("/query/stream")
+async def graph_query_stream(payload: GraphQueryRequest, db: AsyncSession = Depends(get_db)):
+    """在线查询(SSE 流式):逐步返回 意图分流→实体匹配→双路召回→重排→图扩展→生成。
+
+    SSE 事件序列:meta → progress* → results → token* → done / error。
+    供前端实时展示「双路检索每一步」与流式答案;逻辑与 /graph/query 一致,只是逐步骤下发。
+    """
+    from ..graphrag.dict import load_relations
+    from ..graphrag.embeddings import EmbeddingClient
+    from ..graphrag.llm import LLMClient
+    from ..graphrag.milvus_client import AsyncMilvusClient
+    from ..graphrag.neo4j_client import Neo4jClient
+    from ..graphrag.query import router as query_router
+    from ..graphrag.query.answer import build_contexts
+    from ..graphrag.query.nl2query import nl2query
+    from ..graphrag.query.recall import dual_recall, match_entities
+    from ..graphrag.query.rerank import rerank
+    from ..graphrag.query.expand import expand
+
+    def _sse(event: str, data) -> str:
+        return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    async def event_stream():
+        relation_defs = await load_relations(db)
+        intent = query_router.route(payload.query, relation_defs)
+        cond = nl2query(payload.query)
+        yield _sse("meta", {"query": payload.query, "intent": intent, "cond": cond})
+        try:
+            async with Neo4jClient() as neo4j:
+                milvus = AsyncMilvusClient()
+                embeddings = EmbeddingClient()
+                llm = LLMClient()
+
+                entities = await neo4j.list_entities()
+                matched_ids = match_entities(payload.query, entities)
+                matched_names = [e["name"] for e in entities if e["entity_id"] in matched_ids]
+                yield _sse("progress", {"step": "entity_match",
+                                        "matched_entities": matched_names,
+                                        "matched_ids": matched_ids})
+
+                rec = await dual_recall(payload.query, milvus, embeddings,
+                                        matched_ids, kb_id=payload.kb_id)
+                yield _sse("progress", {"step": "recall",
+                                        "route_a": len(rec["a"]),
+                                        "route_b": len(rec["b"])})
+
+                hits = rerank(rec["a"], rec["b"], matched_ids=matched_ids)
+                yield _sse("progress", {"step": "rerank", "top": len(hits)})
+
+                expanded = []
+                graph_facts = []
+                if intent == "graph" and matched_ids:
+                    expanded = await expand(neo4j, matched_ids)
+                    id2name = {e["entity_id"]: e["name"] for e in entities}
+                    graph_facts = await query_router.collect_graph_facts(
+                        neo4j, matched_ids, id2name)
+                    yield _sse("progress", {"step": "graph_expand",
+                                            "expanded": len(expanded),
+                                            "facts": graph_facts})
+
+                yield _sse("results", {"hits": hits,
+                                       "matched_entities": matched_ids,
+                                       "expanded_entities": expanded,
+                                       "graph_facts": graph_facts})
+
+                contexts = build_contexts(hits)
+                gen = llm.generate_answer_stream(payload.query, contexts, graph_facts)
+                sentinel = object()
+
+                def _next():
+                    try:
+                        return next(gen)
+                    except StopIteration:
+                        return sentinel
+
+                while True:
+                    tok = await asyncio.to_thread(_next)
+                    if tok is sentinel:
+                        break
+                    yield _sse("token", {"text": tok})
+
+                yield _sse("done", {})
+        except Exception as e:
+            logger.exception("图谱流式查询失败: %s", payload.query)
+            yield _sse("error", {"message": str(e)})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @router.get("/trace/files")

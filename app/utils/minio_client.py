@@ -88,3 +88,18 @@ def download_source(kb_id, file_id, filename: str) -> bytes:
     ensure_buckets()
     key = _object_key(kb_id, file_id, Path(filename).name)
     return get_object(settings.minio_raw_bucket, key)
+
+
+def list_source_sizes(kb_id) -> dict[str, int]:
+    """列出某知识库 raw 桶下所有源文件对象的大小,返回 {file_id: size_bytes}。
+
+    对象键形如 {kb_id}/{file_id}/{filename},file_id 即 documents.id;一次 list 拉全,避免逐文件 stat。
+    """
+    ensure_buckets()
+    prefix = f"{kb_id}/"
+    sizes: dict[str, int] = {}
+    for obj in get_client().list_objects(settings.minio_raw_bucket, prefix=prefix, recursive=True):
+        parts = obj.object_name.split("/")
+        if len(parts) >= 2 and parts[1]:
+            sizes[parts[1]] = obj.size
+    return sizes
