@@ -34,6 +34,12 @@ QUERY = "X波段 线性调频 雷达信号，载频 9GHz 左右，PRF 1200Hz"
 BASE_ENV = {
     "RETRIEVAL_BACKEND": "fake",
     "RETRIEVAL_SEED_DIR": "data/seed",
+    # model_stub 三能力走本地兜底：smoke 只验检索链路，不依赖真实 ollama/bge 权重。
+    # 若不覆盖，yaml 的 llm.backend=openai 会让 stub 去连 endpoints.llm.url（空）而 500，
+    # 表现为 generation_unavailable（曾误判为链路缺陷）。
+    "EMBED_BACKEND": "hash",
+    "RERANK_BACKEND": "hash",
+    "LLM_BACKEND": "echo",
     "POSTGRES_HOST": "127.0.0.1", "POSTGRES_PORT": "5432",
     "POSTGRES_USER": "retrieval_ro", "POSTGRES_PASSWORD": "dev_only",
     "POSTGRES_DATABASE": "qingxi",
