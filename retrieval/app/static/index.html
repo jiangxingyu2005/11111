@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>retrieval 在线检索 + 测评</title>
+<style>
+:root{--ok:#1b8a3a;--part:#c9820a;--miss:#8a8f98;--bg:#f6f7f9;--card:#fff;--line:#e5e7eb;--brand:#2563eb}
+*{box-sizing:border-box}body{margin:0;font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:var(--bg);color:#1f2328}
+.wrap{max-width:1180px;margin:0 auto;padding:24px}
+h1{font-size:20px;margin:0 0 4px}
+.note{color:#666;font-size:12px;margin:0 0 16px}
+.tabs{display:flex;gap:6px;border-bottom:1px solid var(--line);margin-bottom:18px}
+.tab{padding:9px 16px;cursor:pointer;border:none;background:none;font-size:15px;color:#555;border-bottom:2px solid transparent}
+.tab.active{color:var(--brand);border-bottom:2px solid var(--brand);font-weight:600}
+.pane{display:none}.pane.active{display:block}
+.toolbar{display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+input[type=text]{flex:1;min-width:260px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;font-size:14px}
+input.num{width:110px}
+button.btn{padding:10px 18px;border:none;border-radius:8px;background:var(--brand);color:#fff;font-size:14px;cursor:pointer;font-weight:600}
+button.btn:disabled{opacity:.55;cursor:default}
+.status{color:#555;font-size:13px;min-height:20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:14px}
+.card h3{margin:0 0 10px;font-size:15px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.kpi{background:#fafbfc;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.kpi .v{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+.kpi .l{font-size:12px;color:#666}
+.lat{color:#555;font-size:13px;margin-top:10px}
+table{border-collapse:collapse;width:100%;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+th,td{padding:7px 10px;text-align:left;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
+th{background:#f0f2f5;font-weight:600;font-size:13px}
+tr:last-child td{border-bottom:none}
+.hit{display:flex;align-items:center;gap:10px;padding:7px 9px;border-radius:7px;margin:5px 0;font-size:13px}
+.hit .dot{width:9px;height:9px;border-radius:50%;flex:none}
+.hit .rank{font-weight:700;color:#888;min-width:18px;text-align:center}
+.hit .sc{font-weight:700;min-width:62px;text-align:right;font-variant-numeric:tabular-nums}
+.hit .id{color:#888;font-size:11px;font-family:ui-monospace,monospace}
+.hit .sn{color:#555;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.g2{background:#e8f6ec}.g2 .dot{background:var(--ok)}
+.g1{background:#fdf3e0}.g1 .dot{background:var(--part)}
+.g0{background:#f2f3f5}.g0 .dot{background:var(--miss)}
+.badge{font-size:11px;border-radius:4px;padding:1px 6px;font-weight:600}
+.b2{background:#d3eed9;color:var(--ok)}.b1{background:#f7e3b8;color:var(--part)}.b0{background:#e2e4e8;color:var(--miss)}
+.q{background:var(--card);border:1px solid var(--line);border-radius:10px;margin:10px 0;padding:10px 14px}
+.q .t{font-weight:600}.q .qt{color:#444;margin:2px 0 6px;font-size:13px}
+.q .meta{color:#888;font-size:12px;margin:0 0 4px}
+.deg{color:#a33;font-size:12px;margin-top:6px}
+.timing-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
+.tg{background:#fafbfc;border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.tg .v{font-size:16px;font-weight:700;font-variant-numeric:tabular-nums}
+.tg .l{font-size:12px;color:#666}
+.footnote{color:#666;font-size:12px;margin-top:18px;border-top:1px solid var(--line);padding-top:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>retrieval 在线检索 + 测评</h1>
+  <p class="note">召回率基于内置客观 gold 判定（测评 Tab）；单条在线检索无 gold，故只展示 Top5 匹配度与响应时间。</p>
+
+  <div class="tabs">
+    <button class="tab active" data-pane="search">在线检索</button>
+    <button class="tab" data-pane="eval">测评</button>
+  </div>
+
+  <!-- ── 在线检索 ── -->
+  <div class="pane active" id="pane-search">
+    <div class="toolbar">
+      <input type="text" id="q" placeholder="输入检索 query，如：AN/TPY-2 工作在什么频段？" />
+      <button class="btn" id="btn-search">检索</button>
+    </div>
+    <div class="status" id="search-status"></div>
+    <div id="search-result"></div>
+  </div>
+
+  <!-- ── 测评 ── -->
+  <div class="pane" id="pane-eval">
+    <div class="toolbar">
+      <label>max_per_type（每类抽样，默认 30，全量约 584 条）</label>
+      <input type="number" class="num" id="max-type" value="30" min="1" max="200" />
+      <button class="btn" id="btn-eval">跑测评</button>
+    </div>
+    <div class="status" id="eval-status"></div>
+    <div id="eval-result"></div>
+  </div>
+
+  <div class="footnote">
+    口径：响应时间为检索侧（parse→召回→融合→精排），不含 LLM 生成；crecall=核心召回（gold grade≥2）。
+    Top5 分数为重排置信度（rerank score 0~1）。绿=核心命中、黄=相关、灰=未命中。
+  </div>
+</div>
+
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+// ── Tab 切换 ──
+document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('.pane').forEach(x => x.classList.remove('active'));
+  t.classList.add('active');
+  $('#pane-' + t.dataset.pane).classList.add('active');
+}));
+
+// ── SSE 解析（event:/data: 行）──
+function makeSSEParser(onEvent) {
+  let buf = '';
+  return chunk => {
+    buf += chunk;
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) !== -1) {
+      const block = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      let event = 'message', data = '';
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event:')) event = line.slice(6).trim();
+        else if (line.startsWith('data:')) data += line.slice(5).trim();
+      }
+      if (data && data !== '[DONE]') {
+        try { onEvent(event, JSON.parse(data)); } catch (e) { /* 忽略脏帧 */ }
+      }
+    }
+  };
+}
+
+// ── 在线检索：fetch 流式读 SSE ──
+$('#btn-search').addEventListener('click', async () => {
+  const q = $('#q').value.trim();
+  if (!q) return;
+  const st = $('#search-status'), out = $('#search-result');
+  st.textContent = '检索中…';
+  out.innerHTML = '';
+  $('#btn-search').disabled = true;
+
+  let hits = [], timings = null, degraded = [], tokens = '';
+  const feed = makeSSEParser((event, obj) => {
+    if (event === 'results') { hits = obj.hits || []; degraded = obj.degraded || []; }
+    else if (event === 'done') { timings = obj.timings || {}; degraded = obj.degraded || degraded; }
+    else if (event === 'error') { degraded = obj.degraded || [{code:'error', detail: obj.message}]; }
+    else if (event === 'token') { tokens += obj.text || ''; }
+  });
+
+  try {
+    const resp = await fetch('/api/retrieval', {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({query: q, scope: ['kb_public']}),
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      feed(dec.decode(value, {stream: true}));
+    }
+    renderSearch(q, hits, timings, degraded, tokens);
+    st.textContent = `完成：${hits.length} 条命中`;
+  } catch (e) {
+    st.textContent = '失败：' + e.message;
+  } finally {
+    $('#btn-search').disabled = false;
+  }
+});
+
+function hitRow(h, i) {
+  const rrf = h.score?.rrf, rer = h.score?.rerank;
+  const sc = (typeof rer === 'number') ? (rer * 100).toFixed(1) + '%' : '—';
+  const content = (h.content || '').slice(0, 90);
+  return `<div class="hit g0"><span class="rank">${i + 1}</span>` +
+    `<span class="sc">${esc(sc)}</span>` +
+    `<span class="id">${esc(h.child_id)}</span>` +
+    `<span class="sn">${esc(content)}</span>` +
+    `<span class="id">RRF ${(typeof rrf === 'number') ? rrf.toFixed(3) : '—'}</span></div>`;
+}
+
+function renderSearch(q, hits, timings, degraded, tokens) {
+  const rows = hits.map(hitRow).join('') ||
+    '<div class="hit g0"><span class="dot"></span><span class="sn">（无命中）</span></div>';
+  let timingHtml = '';
+  if (timings) {
+    const keys = [['parse_ms','解析'],['vector_ms','向量'],['rerank_ms','重排'],['pg_fetch_ms','父块回捞'],['first_token_ms','首 token'],['total_ms','总耗时']];
+    timingHtml = '<div class="timing-grid">' + keys.map(([k, l]) =>
+      `<div class="tg"><div class="v">${timings[k] ?? '—'}ms</div><div class="l">${l}</div></div>`).join('') + '</div>';
+  }
+  const deg = degraded.length
+    ? `<div class="deg">降级：${esc(JSON.stringify(degraded))}</div>` : '';
+  $('#search-result').innerHTML =
+    `<div class="card"><h3>查询：${esc(q)}</h3>${rows}</div>` +
+    (timingHtml ? `<div class="card"><h3>响应时间</h3>${timingHtml}</div>` : '') +
+    (tokens ? `<div class="card"><h3>生成摘要</h3><div>${esc(tokens)}</div></div>` : '') +
+    deg;
+}
+
+// ── 测评 ──
+$('#btn-eval').addEventListener('click', async () => {
+  const maxPerType = parseInt($('#max-type').value, 10) || 30;
+  const st = $('#eval-status'), out = $('#eval-result');
+  st.textContent = '跑测评中…（进程内跑 ' + maxPerType + '/类型，视样本量可能需数十秒）';
+  out.innerHTML = '';
+  $('#btn-eval').disabled = true;
+  try {
+    const resp = await fetch('/api/eval/benchmark', {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({max_per_type: maxPerType}),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error('HTTP ' + resp.status + ' ' + (err.detail || ''));
+    }
+    const d = await resp.json();
+    renderEval(d);
+    st.textContent = `完成：${d.meta.n_queries} 条 query（test=${d.test.n_q} / val=${d.val.n_q}）`;
+  } catch (e) {
+    st.textContent = '失败：' + e.message;
+  } finally {
+    $('#btn-eval').disabled = false;
+  }
+});
+
+function kpi(label, val) { return `<div class="kpi"><div class="v">${val}</div><div class="l">${label}</div></div>`; }
+
+function renderEval(d) {
+  const meta = d.meta, keys = ['crecall@5','crecall@10','recall@5','cprec@5','mrr','ndcg@10'];
+  const card = (name, r) => {
+    const f = r.final, lat = r.latency;
+    const kpis = [
+      kpi('核心召回 crecall@5', (f['crecall@5'] ?? 0).toFixed(3)),
+      kpi('召回 recall@5', (f['recall@5'] ?? 0).toFixed(3)),
+      kpi('命中率@5', (d['hit_rate@5']?.[name === '测试集 test' ? 'test' : 'val'] ?? 0).toFixed(1) + '%'),
+      kpi('MRR', (f['mrr'] ?? 0).toFixed(3)),
+      kpi('nDCG@10', (f['ndcg@10'] ?? 0).toFixed(3)),
+      kpi('P95 延迟', (lat['p95_ms'] ?? 0).toFixed(0) + 'ms'),
+    ].join('');
+    const latLine = `<div class="lat">响应时间·检索侧：mean=${lat['mean_ms']?.toFixed(1)}ms ` +
+      `p50=${lat['p50_ms']?.toFixed(1)}ms p90=${lat['p90_ms']?.toFixed(1)}ms p95=${lat['p95_ms']?.toFixed(1)}ms ` +
+      `p99=${lat['p99_ms']?.toFixed(1)}ms max=${lat['max_ms']?.toFixed(1)}ms｜超预算(&gt;5.2s)=${lat['over_budget']}/${lat['n']}</div>`;
+    return `<div class="card"><h3>${name}（n=${r.n_q}）</h3><div class="kpis">${kpis}</div>${latLine}</div>`;
+  };
+
+  const typeRows = Object.entries(d.by_type || {}).map(([t, s]) => {
+    const f = s.final;
+    return `<tr><td>${esc(t)}</td><td>${s.n_q}</td>` +
+      `<td>${(f['crecall@5'] ?? 0).toFixed(3)}</td><td>${(f['recall@5'] ?? 0).toFixed(3)}</td>` +
+      `<td>${(f['cprec@5'] ?? 0).toFixed(3)}</td><td>${(f['mrr'] ?? 0).toFixed(3)}</td>` +
+      `<td>${(s['hit_rate@5'] ?? 0).toFixed(1)}%</td><td>${s.latency['mean_ms']?.toFixed(1)}ms</td></tr>`;
+  }).join('');
+  const typeTable = `<table><tr><th>类型</th><th>n</th><th>crecall@5</th><th>recall@5</th><th>cprec@5</th><th>MRR</th><th>命中率@5</th><th>mean</th></tr>${typeRows}</table>`;
+
+  // 逐 query Top5 匹配度（按类型分组，绿/黄/灰）
+  const byType = {};
+  for (const r of d.per_query || []) (byType[r.type] ||= []).push(r);
+  const qBlocks = Object.entries(byType).map(([t, rows]) => {
+    const items = rows.map(r => {
+      const hits = (r.final || []).map(h => {
+        const g = h.grade ?? 0;
+        const cls = g === 2 ? 'g2' : (g === 1 ? 'g1' : 'g0');
+        const bcls = g === 2 ? 'b2' : (g === 1 ? 'b1' : 'b0');
+        const bl = g === 2 ? '核心命中' : (g === 1 ? '相关' : '未命中');
+        const sc = (typeof h.rerank_score === 'number') ? (h.rerank_score * 100).toFixed(1) + '%' : '—';
+        return `<div class="hit ${cls}"><span class="dot"></span><span class="badge ${bcls}">${bl}</span>` +
+          `<span class="sc">${esc(sc)}</span><span class="id">${esc(h.child_id)}</span>` +
+          `<span class="sn">${esc(h.snippet || '')}</span></div>`;
+      }).join('') || '<div class="hit g0"><span class="dot"></span><span class="sn">（无命中）</span></div>';
+      return `<div class="q"><div class="meta">${esc(r.type)} · ${r.lat_ms}ms · gold ${r.core_n}/${r.gold_n}</div>` +
+        `<div class="qt">${esc(r.q)}</div>${hits}</div>`;
+    }).join('');
+    return `<h3>${esc(t)}（${rows.length} 条）</h3>` + items;
+  }).join('');
+
+  const metaLine = `<div class="note">seed：${esc(meta.seed_dir)}｜chunks=${meta.n_chunks}｜queries=${meta.n_queries}｜ks=${esc(JSON.stringify(meta.ks))}｜后端：${esc(meta.backend)}</div>`;
+  $('#eval-result').innerHTML = metaLine +
+    `<div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr))">${card('测试集 test', d.test)}${card('验证集 val', d.val)}</div>` +
+    `<div class="card"><h3>分类型明细（test+val）</h3>${typeTable}</div>` +
+    `<div class="card"><h3>逐 query Top5 匹配度</h3>${qBlocks}</div>`;
+}
+</script>
+</body>
+</html>

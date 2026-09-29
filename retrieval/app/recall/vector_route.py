@@ -171,7 +171,7 @@ async def recall(query: str, *, scope: list[str], collector: DegradedCollector,
         return []
 
 
-def _fake_search(routes: dict[str, dict], scope: list[str], cfg: dict, hybrid: bool) -> list[Hit]:
+def _fake_search(routes: dict[str, dict], scope: list[str], cfg: dict) -> list[Hit]:
     from ..store.fake import get_fake_store
 
     top_k = int(cfg["milvus"]["dense"]["primary"].get("top_k", 100))
@@ -183,7 +183,7 @@ def _fake_search(routes: dict[str, dict], scope: list[str], cfg: dict, hybrid: b
 def _milvus_search(routes: dict[str, dict], scope: list[str], cfg: dict) -> list[Hit]:
     """dense-only 检索（单内层子路）。"""
     if cfg.get("_backend") == "fake":
-        return _fake_search(routes, scope, cfg, hybrid=False)
+        return _fake_search(routes, scope, cfg)
     from pymilvus import MilvusClient  # 懒加载
 
     s = get_settings()
@@ -211,7 +211,7 @@ def _milvus_hybrid_search(routes: dict[str, dict], scope: list[str], cfg: dict) 
     列未就绪而开关被误开：回退 dense-only + 记日志（禁静默假装 hybrid）。
     """
     if cfg.get("_backend") == "fake":
-        return _fake_search(routes, scope, cfg, hybrid=True)
+        return _fake_search(routes, scope, cfg)
     from pymilvus import AnnSearchRequest, MilvusClient, RRFRanker  # 懒加载
 
     s = get_settings()

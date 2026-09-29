@@ -36,7 +36,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "services"))
 
 from providers import (  # noqa: E402
-    BACKEND_FALLBACK, EmbedProvider, LLMProvider, RerankProvider,
+    BACKEND_FALLBACK, EmbedProvider, RerankProvider,
     describe, load_endpoint, mask_url,
 )
 

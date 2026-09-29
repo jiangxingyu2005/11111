@@ -5,6 +5,7 @@
   chunks.json    子块 + 向量 + 稀疏 + span（Milvus ems_chunks 同源）
   entities.json  实体（Milvus ems_entities 同源）
   edges.json     实体边 + BINDS 绑定边（Neo4j 同源）
+  rules.json     预设推理规则种子（fake 后端规则引擎数据源，与真库 rules 表同构）
   meta.json      生成指纹（dim / embed 通道 / 条数）——用于校验"seed 与在线同空间"
 
 用法：
@@ -59,6 +60,61 @@ for _a in AREAS:
     ENTITY_REGISTRY.append((_a, "Area", []))
 for _c in COUNTRIES:
     ENTITY_REGISTRY.append((_c, "Country", []))
+
+# ─────────────────────────────────────────────────────────────
+# 预设推理规则种子（fake 后端 rules.json；条件 DSL 见 docs/api/10-rules.md）
+# ─────────────────────────────────────────────────────────────
+SEED_RULES = [
+    {
+        "id": "R_001",
+        "name": "火控雷达疑似优先",
+        "description": "正文命中火控雷达或 KG 置信度不足时标记疑似优先",
+        "condition": {
+            "all": [],
+            "any": [
+                {"field": "content", "op": "contains", "value": "火控雷达"},
+                {"field": "kg_confidence", "op": "lt", "value": 0.7},
+            ],
+        },
+        "action": {"type": "mark", "label": "疑似优先", "severity": "high",
+                   "hint": "建议优先核查该辐射源"},
+        "priority": 10,
+        "kb_id": None,
+    },
+    {
+        "id": "R_002",
+        "name": "低重排分复核",
+        "description": "重排分低于 0.5 的证据提示复核（验证 rerank_score 数值算子）",
+        "condition": {"all": [{"field": "rerank_score", "op": "lt", "value": 0.5}]},
+        "action": {"type": "mark", "label": "低分复核", "severity": "warning",
+                   "hint": "该证据与问题的匹配度偏低"},
+        "priority": 5,
+        "kb_id": None,
+    },
+    {
+        "id": "R_003",
+        "name": "域内火控信号",
+        "description": "kb_public 且章节含火控时标记（验证 kb_id + section 子句）",
+        "condition": {
+            "all": [
+                {"field": "kb_id", "op": "eq", "value": "kb_public"},
+                {"field": "section", "op": "contains", "value": "火控"},
+            ],
+        },
+        "action": {"type": "mark", "label": "域内火控", "severity": "info", "hint": ""},
+        "priority": 1,
+        "kb_id": None,
+    },
+    {
+        "id": "R_004",
+        "name": "融合票分存在",
+        "description": "RRF 融合票分 > 0（任何融合命中都满足，验证 rrf_score 数值算子与端到端触发）",
+        "condition": {"all": [{"field": "rrf_score", "op": "gt", "value": 0}]},
+        "action": {"type": "mark", "label": "已融合", "severity": "info", "hint": ""},
+        "priority": 0,
+        "kb_id": None,
+    },
+]
 
 
 def _ent_id(name: str) -> str:
@@ -164,7 +220,7 @@ def main() -> int:
     cursor = 0
     texts: list[str] = []
 
-    for d in docs:
+    for di, d in enumerate(docs):
         pid = f"p_{d['doc_id']}"
         body_parts, spans = [], []
         for para in d["paras"]:
@@ -181,6 +237,9 @@ def main() -> int:
             "keywords": [d["radar"], d["platform"], d["band"], d["mod"], d["function"]],
             "content_version": 1, "kb_id": d["kb_id"], "source_type": "recon_record",
             "toa_text": d["toa"],
+            # KG 实体抽取置信度（入库时自设置的置信度表，存 PG parent_document.kg_confidence）。
+            # fake seed 用确定性渐变值 0.5~0.96，供规则引擎的 kg_confidence 子句验证触发/不触发两态。
+            "kg_confidence": round(0.5 + 0.02 * di, 2),
         })
         # 子块（段落）与父块内的字符区间 span（G-API-02：每条边必须有 evidence，span 是硬要求）
         doc_chunks: list[tuple[str, int, int, str]] = []
@@ -273,6 +332,8 @@ def main() -> int:
                       ("communities", communities)):
         (out / f"{name}.json").write_text(
             json.dumps(obj, ensure_ascii=False, indent=1), encoding="utf-8")
+    (out / "rules.json").write_text(
+        json.dumps(SEED_RULES, ensure_ascii=False, indent=1), encoding="utf-8")
     (out / "meta.json").write_text(json.dumps({
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "embed_channel": args.embed,

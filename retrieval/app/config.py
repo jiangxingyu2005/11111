@@ -75,6 +75,11 @@ class Settings(BaseSettings):
     # 逃生阀：real 通道却仍用占位模型时，默认拒绝启动；置 1 则只报 ERROR 放行（仅供 staging）
     retrieval_allow_placeholder: bool = False
 
+    # —— 记忆管理（多人隔离 + 会话多轮上下文 + mem0 长期事实）——
+    memory_enabled: bool = False                 # 功能开关（默认关，不影响现有部署）
+    memory_auth_mode: str = "passthrough"        # passthrough（token 即 user_id）/ jwt（验签 sub）
+    memory_jwt_secret: str = ""                  # jwt 模式验签密钥（MEMORY_JWT_SECRET）
+
     @property
     def pg_dsn(self) -> str:
         return (

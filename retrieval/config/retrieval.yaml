@@ -24,7 +24,7 @@ models:
     max_length: 8192
     backend: bge_m3            # hash | bge_m3
     # 稀疏路：与下面 milvus.sparse.enabled 强联动（启动时校验两者必须一致）
-    sparse_enabled: true       # IF-1 扩 text_sparse 列后，此处与 milvus.sparse.enabled 同改 true
+    sparse_enabled: false      # IF-1 扩 text_sparse 列后，此处与 milvus.sparse.enabled 同改 true
   rerank:
     id: bge-reranker-v2-m3
     backend: bge               # hash | bge
@@ -65,8 +65,8 @@ endpoints:
     request: {}                # {query_key, texts_key, model_key, extra}
     response: {}               # {scores}
   llm:
-    url: http://127.0.0.1:11434/v1   # ollama OpenAI 兼容端点；部署时可由 LLM_URL/LLM_UPSTREAM 覆盖
-    model: qwen2.5:3b          # ollama 模型名
+    url: ""                    # 留空则由 .env 的 LLM_UPSTREAM 提供
+    model: ""                  # 留空则用 models.llm.id
     api_key: ""
     headers: {}
     timeout_s: 180
@@ -113,7 +113,7 @@ milvus:
       top_k: 100
       threshold: 0.68        # τ_b：B 路可略低于 A 路，但差距不宜 > 0.1
   sparse:
-    enabled: true              # IF-1 已扩 text_sparse 列 + 重跑 seed，启用内层 dense+sparse hybrid
+    enabled: false             # 2026-09-28 BGE-M3 定案后预留：IF-1 扩 text_sparse 列后改 true 即启用 hybrid
     field: text_sparse
     metric_type: IP            # BGE-M3 lexical_weights 是学习稀疏权重，内积度量；不能用 BM25（BM25 是 Milvus 原生 BM25 Function 输出专属）
     top_k: 100
@@ -188,16 +188,36 @@ subgraph:
   node_limit: 50
   edge_limit: 100            # 与 api/subgraph_view.v1.schema.json edges.maxItems=100 对齐
 
+# ============================================================
+# 记忆管理（多人隔离 + 会话多轮 + 压缩 + mem0 长期事实）
+# ------------------------------------------------------------
+# 算法参数以 yaml 为准（遵守「算法参数以 yaml 为准」纪律）；
+# 总开关/身份模式/密钥走 env（MEMORY_ENABLED / MEMORY_AUTH_MODE / MEMORY_JWT_SECRET）。
+# 默认 enabled=false：现有部署与既有用例行为不变。
+# ============================================================
+memory:
+  enabled: false              # 总开关（与 env MEMORY_ENABLED 联动，默认关）
+  window_size: 10             # 窗口保留消息条数（≈5 轮 × 2）
+  budget_tokens: 4096         # 记忆区预算（摘要+窗口估算 token 上限）
+  trigger_ratio: 0.8          # 记忆区占用 ≥ 预算 × 0.8 触发压缩（不按条数）
+  max_compressions: 5         # 压缩次数上限，压满后只留最新 window_size 条原文
+  summary_target_ratio: 0.4   # 压缩后目标占用比例（预留）
+  mem0:
+    vector_store: milvus      # 自托管 AsyncMemory + Milvus（复用 milvus_uri）
+    collection: mem0_memory
+    # embedding 本地化：huggingface provider 进程内跑 graphrag_embedding_model（BAAI/bge-m3，1024 维），
+    # 与离线 qingxi 侧同模型同空间、零外联。需装 sentence-transformers（体积大，见 requirements.txt 说明）。
+
 degradation:
-  budget_s: 15.0             # 检索侧(生成前)预算：recall ~1-2s + rerank ~6-7s（L2 已串行化到重排后，不再与嵌入/重排争 CPU）
+  budget_s: 5.2              # 检索侧可用预算 = 11.5 - LLM预留6.0 - 上下文0.3
   cutoffs:
-    - threshold_s: 8.0       # >8s 砍重排（recall 正常 2~6s 不触发，避免 hybrid/争用把精排误砍掉）
+    - threshold_s: 3.5       # >3.5s 砍重排
       level: L3
-    - threshold_s: 10.0      # >10s 砍图路（保留本地遍历，砍社区摘要）
+    - threshold_s: 4.5       # >4.5s 砍图路（保留本地遍历，砍社区摘要）
       level: L2
-    - threshold_s: 12.0      # >12s 砍 NL2Query + 稀疏路
+    - threshold_s: 5.0       # >5.0s 砍 NL2Query + 稀疏路
       level: L1
-    - threshold_s: 15.0      # >15s 转 PG 全文兜底
+    - threshold_s: 5.2       # >5.2s 转 PG 全文兜底
       level: L0
 
 # ─────────────────────────────────────────────────────────────

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from typing import Optional
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")

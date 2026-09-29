@@ -16,6 +16,14 @@ asyncpg>=0.29
 # FlagEmbedding 体积大，默认不装；RETRIEVAL_EMBED_MODE=remote 时走嵌入服务端点
 # FlagEmbedding>=1.2
 
+# 记忆管理（多人隔离 + mem0 长期事实 + jwt 身份解析）
+mem0ai>=0.1
+PyJWT>=2.8
+# mem0 本地 embedding（huggingface provider 进程内跑 BGE-M3，与离线侧同模型同空间）——
+# 体积大（torch + sentence-transformers），默认不装；启用 memory 后需：
+#   pip install sentence-transformers
+# sentence-transformers>=2.7
+
 # 测试
 pytest>=8.0
 jsonschema>=4.21

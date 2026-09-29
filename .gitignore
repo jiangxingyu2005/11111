@@ -12,6 +12,8 @@ output/
 model/
 text/
 *.log
+logs/
+retrieval/data/
 ems_resp.json
 ems_html_resp.json
 parse_resp.json

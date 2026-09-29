@@ -183,7 +183,6 @@ def _call_function(client, s: dict, name: str, instruction: str, text: str, sche
     - use_function_calling=False:小模型(如 ollama qwen2.5:3b)不支持 function calling,
       把 schema 内嵌进 prompt 要求输出 JSON,再走 _parse_json 解析。两者复用同一解析容错。
     """
-    import json
     import time
     use_fc = bool(s.get("use_function_calling", True))
     max_retries = int(s.get("max_retries", 2))

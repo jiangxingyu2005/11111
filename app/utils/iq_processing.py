@@ -203,7 +203,6 @@ def extract_time_domain_features(I: np.ndarray, Q: np.ndarray, fs: float) -> Dic
     phase_skewness_val = float(skew(phase))
     
     # 瞬时频率特征
-    d_phase = np.diff(phase)
     # 解包裹避免跳变
     d_phase_unwrapped = np.unwrap(phase)
     d_phase_unwrapped = np.diff(d_phase_unwrapped)
@@ -357,8 +356,7 @@ def extract_higher_order_cumulant_features(I: np.ndarray, Q: np.ndarray, fs: flo
         C63: 六阶累积量 C63
     """
     complex_sig = I + 1j * Q
-    N = len(complex_sig)
-    
+
     # 去直流
     complex_sig = complex_sig - np.mean(complex_sig)
     
@@ -720,14 +718,13 @@ def compute_wigner_ville(I: np.ndarray, Q: np.ndarray, fs: float, limit: int = 2
     # W(t, f) = sum_tau x(t+tau) * xconj(t-tau) * exp(-j2*pi*f*tau)
     # 使用高效实现
     
-    # 定义时滞范围
+    # 时滞范围（tau 只用于上面的数学注释，实际走高效 FFT 实现）
     max_tau = N // 2
-    tau = np.arange(-max_tau + 1, max_tau)
-    
+
     # 计算WVD
     T = N  # 时间点数量
     F = N  # 频率点数量
-    
+
     WVD = np.zeros((F, T), dtype=complex)
     
     for t in range(T):

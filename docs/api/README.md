@@ -18,6 +18,7 @@ qingxi 服务全部 HTTP 接口,按类别拆分到本目录各文件。Base URL 
 | 图质量与消歧 | [08-graph-metrics-resolve.md](08-graph-metrics-resolve.md) |
 | IQ 检索库 | [09-iq.md](09-iq.md) |
 | Neo4j 图查询/管理 | [10-graph-neo4j.md](10-graph-neo4j.md) |
+| 预设推理规则 | [10-rules.md](10-rules.md) |
 
 ## 端点总览
 
@@ -34,6 +35,7 @@ qingxi 服务全部 HTTP 接口,按类别拆分到本目录各文件。Base URL 
 | 图质量与消歧 | `/graph/metrics` `/graph/quality` `/graph/mesh/link-orphans` `/graph/resolve` | GET/POST |
 | IQ 检索库 | `/iq/ingest` `/iq/search` | POST |
 | Neo4j 图查询/管理 | `/graph/nodes` `/graph/entities` `/graph/entities/{entity_id}` `/graph/nodes/segments` `/graph/nodes/segments/{parent_id}` `/graph/relations` `/graph/binds` | GET/POST/PUT/DELETE |
+| 预设推理规则 | `/rules` `/rules/{rule_id}` | POST/GET/PUT/DELETE |
 
 ## 通用约定
 
