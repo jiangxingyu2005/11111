@@ -29,6 +29,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from app.config import embed_dim  # noqa: E402
 from app.store.hash_embed import hash_embedding, hash_numeric_embedding, hash_sparse  # noqa: E402
 
 OUT = ROOT / "data" / "seed"
@@ -206,7 +207,7 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--embed", choices=["hash", "service"], default="hash")
     ap.add_argument("--embed-url", default="http://127.0.0.1:8001/embed")
-    ap.add_argument("--dim", type=int, default=1024)
+    ap.add_argument("--dim", type=int, default=embed_dim())
     ap.add_argument("--out", default=str(OUT))
     args = ap.parse_args()
 

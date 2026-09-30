@@ -257,16 +257,9 @@ async def parse_l2(query: str, collector: DegradedCollector) -> ParsedQuery | No
                          "L2 endpoint not configured", "understand")
         return None
     try:
-        import httpx
+        from ..llm import chat
         messages = _build_l2_messages(query)
-        url = s.graphrag_llm_base_url.rstrip("/") + "/chat/completions"
-        async with httpx.AsyncClient(timeout=_L2_TIMEOUT_S) as cli:
-            r = await cli.post(
-                url, headers={"Authorization": f"Bearer {s.graphrag_llm_api_key}"},
-                json={"model": s.graphrag_llm_model, "messages": messages,
-                      "stream": False, "temperature": 0.0})
-            r.raise_for_status()
-            content = ((r.json().get("choices") or [{}])[0].get("message") or {}).get("content", "")
+        content = await chat(messages, temperature=0.0, timeout=_L2_TIMEOUT_S)
         data = _extract_json(content)
         if not data:
             collector.record(DegradedCode.NL2QUERY_LLM_TIMEOUT,

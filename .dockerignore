@@ -1,0 +1,30 @@
+# —— 模型权重：走 models/ 挂载，不进镜像 ——
+model/
+retrieval/model/
+
+# —— 运行时数据 / 上传 / 输出 / 日志 ——
+uploads/
+output/
+logs/
+retrieval/logs/
+text/
+
+# —— 金标准评测数据（可选，体积大）——
+retrieval/data/seed_date/
+retrieval/data/eval/
+
+# —— git / 缓存 / 文档 ——
+.git/
+.gitignore
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+**/.pytest_cache/
+docs/
+retrieval/docs/
+retrieval/tests/
+retrieval/eval/
+*.md
+*.docx
+*.log

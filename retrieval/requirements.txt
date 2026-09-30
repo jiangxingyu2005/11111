@@ -12,12 +12,17 @@ pymilvus>=2.4
 neo4j>=5.19
 asyncpg>=0.29
 
-# query 向量化（阶段一与离线同模型：bge-large-zh-v1.5；阶段二切 BGE-M3 见 V3.0 §2）
-# FlagEmbedding 体积大，默认不装；RETRIEVAL_EMBED_MODE=remote 时走嵌入服务端点
-# FlagEmbedding>=1.2
+# 模型运行时（model_stub 本地加载：BGE-M3 嵌入 + bge-reranker 重排 + transformers 小模型 LLM）
+# 离线打包必须带：pip download 据此抓 wheel；torch 是 FlagEmbedding/transformers 的底层依赖，
+# CPU 机走 CPU 源（见下方说明），GPU 机换 CUDA wheel（见 docs/offline-部署与换模型.md）。
+FlagEmbedding>=1.2
+transformers>=4.40
+# torch：不写死版本，由 scripts/package_offline.py 单独抓 wheel——
+#   CPU 机：pip download torch --index-url https://download.pytorch.org/whl/cpu
+#   GPU 机：换 CUDA 源。避免裸 `pip install` 默认抓到 CUDA 大包。
 
 # 记忆管理（多人隔离 + mem0 长期事实 + jwt 身份解析）
-mem0ai>=0.1
+mem0ai>=2.2.1,<2.3
 PyJWT>=2.8
 # mem0 本地 embedding（huggingface provider 进程内跑 BGE-M3，与离线侧同模型同空间）——
 # 体积大（torch + sentence-transformers），默认不装；启用 memory 后需：

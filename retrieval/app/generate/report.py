@@ -121,32 +121,12 @@ async def stream_report(
         return
 
     messages = build_prompt(query, hits, parents, rule_hits, memories, summary, window)
-    url = s.graphrag_llm_base_url.rstrip("/") + "/chat/completions"
     try:
         from ..store.fake import guard
         guard("llm")          # 故障注入（跑降级矩阵用）
-        import httpx
-        async with httpx.AsyncClient(timeout=60.0) as cli:
-            async with cli.stream(
-                "POST", url,
-                headers={"Authorization": f"Bearer {s.graphrag_llm_api_key}"},
-                json={"model": s.graphrag_llm_model, "messages": messages,
-                      "stream": True, "temperature": 0.2},
-            ) as r:
-                r.raise_for_status()
-                async for line in r.aiter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        delta = json.loads(data)["choices"][0].get("delta", {})
-                    except (ValueError, KeyError, IndexError):
-                        continue
-                    tok = delta.get("content")
-                    if tok:
-                        yield tok
+        from ..llm import chat_stream
+        async for tok in chat_stream(messages, temperature=0.2):
+            yield tok
     except Exception as e:
         log.warning("generate failed: %s", e)
         collector.record(DegradedCode.GENERATION_UNAVAILABLE, str(e)[:200], "generate")

@@ -29,6 +29,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from app.config import embed_dim  # noqa: E402
+
 SEED = ROOT / "data" / "seed"
 
 # 真模型通道的验收线（E1 完成后必须达到）
@@ -138,8 +140,8 @@ def main() -> int:
             fails.append(f"MRR@10={mrr:.3f} < {REAL_GATES['mrr@10']}")
         if t1 < REAL_GATES["top1_cosine"]:
             fails.append(f"Top1余弦={t1:.3f} < {REAL_GATES['top1_cosine']}（哈希量纲≈0.43，换模型必升）")
-        if dim != 1024:
-            fails.append(f"dim={dim} != 1024（BGE-M3 dense 必须 1024）")
+        if dim != embed_dim():
+            fails.append(f"dim={dim} != {embed_dim()}（与 config/retrieval.yaml:models.embed.dim 不符）")
         if meta.get("embed_channel") != "service":
             fails.append(f"seed 仍是 {meta.get('embed_channel')} 通道建的库——换模型必须重跑 gen_seed.py")
         if fails:

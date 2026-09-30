@@ -16,7 +16,9 @@ import math
 import re
 from collections import Counter
 
-DIM = 1024                       # 与 BGE-M3 dense 维度对齐
+DIM = 1024                       # fake/hash 通道占位维度（dev 专用），与当前 BGE-M3 dense 对齐。
+# 生产维度单一事实源是 config/retrieval.yaml:models.embed.dim（脚本经 app.config.embed_dim() 读）；
+# 换 embedding 模型改 dim 后，若仍用 fake 通道做 dev 验证，须同步此默认值。
 _WORD = re.compile(r"[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*")
 _CJK = re.compile(r"[\u4e00-\u9fff]")
 

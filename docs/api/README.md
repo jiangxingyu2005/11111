@@ -6,8 +6,11 @@ qingxi 服务全部 HTTP 接口,按类别拆分到本目录各文件。Base URL 
 
 ## 类别索引
 
+> **前端对接先看 [00-frontend-quickstart.md](00-frontend-quickstart.md)**:串起「建库 → 上传解析 → 流式提问 → 溯源」的端到端流程。
+
 | 类别 | 文件 |
 |---|---|
+| 前端对接快速上手 | [00-frontend-quickstart.md](00-frontend-quickstart.md) |
 | 清洗解析 | [01-cleaning.md](01-cleaning.md) |
 | 知识库管理 | [02-knowledge-bases.md](02-knowledge-bases.md) |
 | 文档下载 | [03-documents.md](03-documents.md) |

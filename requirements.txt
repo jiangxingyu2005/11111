@@ -23,7 +23,12 @@ scikit-learn
 h5py
 scipy
 onnxruntime  # IQ 嵌入(WavesFM 256 维,CPU 推理)
-# GraphRAG(ems_graphrag 融合):向量库 + 图库(openai 客户端在 llm.py/embeddings.py 里延迟导入,仅 openai provider 需要)
+# GraphRAG(ems_graphrag 融合):向量库 + 图库
 pymilvus
 neo4j
 confluent-kafka
+# LLM/嵌入 provider 依赖(离线切本地 ollama + bge 时需要,代码里延迟导入):
+#   openai          —— llm.py/embeddings.py 的 openai provider(指向 ollama /v1)
+#   FlagEmbedding   —— embeddings.py 的 bge 本地模型(bge-m3 / bge-large-zh-v1.5)
+openai
+FlagEmbedding

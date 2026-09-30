@@ -11,8 +11,6 @@ from __future__ import annotations
 import logging
 import re
 
-from ..config import get_settings
-
 log = logging.getLogger("retrieval.memory.compressor")
 
 _CJK = re.compile(r"[一-鿿]")
@@ -33,18 +31,14 @@ def estimate_tokens(text: str) -> int:
 
 
 async def recursive_summarize(prev_summary: str, turns: list[dict]) -> str:
-    """把「旧摘要 + 新增轮次」压缩成新摘要（调本地 LLM，OpenAI 兼容 /chat/completions）。
+    """把「旧摘要 + 新增轮次」压缩成新摘要（走 app.llm 统一接口）。
 
     失败抛异常，由调用方 fail-closed（保留旧摘要/原文）。
     """
-    s = get_settings()
-    if not s.graphrag_llm_base_url or not s.graphrag_llm_model:
-        raise RuntimeError("LLM 未配置，无法压缩摘要")
+    from ..llm import chat
     from ..store.fake import guard
 
     guard("llm")
-    import httpx
-
     user_text = "\n".join(f"{t.get('role', 'user')}: {t.get('content', '')}" for t in turns)
     messages = [
         {"role": "system",
@@ -54,17 +48,7 @@ async def recursive_summarize(prev_summary: str, turns: list[dict]) -> str:
          "content": f"既有摘要：{prev_summary or '(空)'}\n\n新增对话：\n{user_text}\n\n"
                     "请输出压缩后的摘要（只输出摘要正文，不要解释）。"},
     ]
-    url = s.graphrag_llm_base_url.rstrip("/") + "/chat/completions"
-    async with httpx.AsyncClient(timeout=60.0) as cli:
-        r = await cli.post(
-            url,
-            headers={"Authorization": f"Bearer {s.graphrag_llm_api_key}"},
-            json={"model": s.graphrag_llm_model, "messages": messages,
-                  "stream": False, "temperature": 0.2},
-        )
-        r.raise_for_status()
-        data = r.json()
-        return (data["choices"][0]["message"]["content"] or "").strip()
+    return await chat(messages, temperature=0.2)
 
 
 async def maybe_compress(store, memory, conv: dict, cfg: dict) -> None:

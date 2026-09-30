@@ -41,20 +41,21 @@ async def backfill(hits: list[Hit], collector: DegradedCollector) -> dict[str, d
         try:
             rows = await conn.fetch(
                 """
-                SELECT parent_id, content, content_version, summary, keywords, kg_confidence
+                SELECT parent_id, content, content_version, summary, keywords
                 FROM parent_document WHERE parent_id = ANY($1::text[])
                 """,
                 parent_ids,
             )
         finally:
             await conn.close()
+        # kg_confidence 不在 parent_document 表(real 通道该字段属 Neo4j :BINDS 关系)，
+        # 故不 SELECT；规则引擎/报告对缺失 kg_confidence 已 fail-closed（p.get() 返回 None）。
         return {
             r["parent_id"]: {
                 "content": r["content"],
                 "content_version": r["content_version"],
                 "summary": r["summary"],
                 "keywords": r["keywords"],
-                "kg_confidence": r["kg_confidence"],
             }
             for r in rows
         }

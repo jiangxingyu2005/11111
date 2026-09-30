@@ -106,7 +106,7 @@ def get_settings() -> Settings:
             )
     # 模型契约校验：占位模型在 real 通道是硬停项（E1 静默风险），fake 通道只告警
     problems = validate_model_contract(
-        retrieval_cfg(), s.retrieval_backend, s.retrieval_allow_placeholder)
+        retrieval_cfg(), s.retrieval_backend, s.retrieval_allow_placeholder, s)
     hard = [p for p in problems if p.startswith("RETRIEVAL_BACKEND=real")]
     if hard and not s.retrieval_allow_placeholder:
         raise ValueError("模型契约校验失败：" + "；".join(problems))
@@ -142,6 +142,16 @@ def retrieval_cfg() -> dict:
     return load_yaml("retrieval")
 
 
+def embed_dim() -> int:
+    """嵌入 dense 维度（单一事实源 = config/retrieval.yaml:models.embed.dim）。
+
+    换 embedding 模型时只改 yaml 的 dim + 重建 collection + 重跑 seed，代码零改动。
+    scripts（init_milvus / gen_seed / check_embed_space）统一从这里取，不再各自写死 1024。
+    """
+    m = retrieval_cfg().get("models") or {}
+    return int((m.get("embed") or {}).get("dim", 1024))
+
+
 # ---- 模型契约校验（E1/E2/E3 参数位的守门人）----
 # 存在理由：模型身份只登记在 config/retrieval.yaml:models。
 # "配了 BAAI/bge-m3 实际跑 hash"是本项目最危险的静默漂移——链路全绿、契约合法、
@@ -158,7 +168,8 @@ BACKEND_PROTOCOL = {"hash": "local", "bge_m3": "local", "bge": "local",
                     "openai": "openai", "generic": "generic"}
 
 
-def validate_model_contract(cfg: dict, backend: str, allow_placeholder: bool) -> list[str]:
+def validate_model_contract(cfg: dict, backend: str, allow_placeholder: bool,
+                            settings=None) -> list[str]:
     """返回问题列表；空列表表示通过。硬性问题在调用方决定是否 raise。"""
     problems: list[str] = []
     m = cfg.get("models") or {}
@@ -169,9 +180,8 @@ def validate_model_contract(cfg: dict, backend: str, allow_placeholder: bool) ->
         if b not in ALLOWED_BACKENDS[kind]:
             problems.append(f"models.{kind}.backend={b!r} 非法，应为 {sorted(ALLOWED_BACKENDS[kind])}")
 
-    # BGE-M3 的 dense 必须 1024 维，写错会与 collection 维度不匹配
-    if "bge-m3" in str(emb.get("id", "")).lower() and emb.get("dim") != 1024:
-        problems.append(f"models.embed.id=BAAI/bge-m3 但 dim={emb.get('dim')}，必须是 1024")
+    # dim 一致性不再在此写死 1024：声明(models.embed.dim)与实际模型输出
+    # 由 providers.EmbedProvider.embed 的 expect_dim 闸门校验(换模型忘重建库会在那里炸)。
 
     # 稀疏路两处开关必须联动，否则"以为开了 hybrid 其实没开"
     sp_yaml = bool(((cfg.get("milvus") or {}).get("sparse") or {}).get("enabled"))
@@ -195,6 +205,10 @@ def validate_model_contract(cfg: dict, backend: str, allow_placeholder: bool) ->
             url = ((eps.get(kind) or {}).get("url") or "").strip() \
                 or os.getenv(f"{kind.upper()}_URL", "") \
                 or (os.getenv("LLM_UPSTREAM", "") if kind == "llm" else "")
+            # LLM 已收敛到统一接口 app/llm.py（复用 GRAPHRAG_LLM_*，走 settings 而非 yaml endpoints）；
+            # .env 不进 os.environ，故只能从 settings.graphrag_llm_base_url 取，避免误报「没给地址」。
+            if not url and kind == "llm" and settings is not None:
+                url = (getattr(settings, "graphrag_llm_base_url", "") or "").strip()
             if not url:
                 problems.append(
                     f"models.{kind}.backend={b} 需要 endpoints.{kind}.url（或 env {kind.upper()}_URL），"

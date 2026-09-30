@@ -2,6 +2,8 @@
 
 > 主施工依据：《在线检索框架开发文档_V3.1》（文档库）｜工程包说明：《在线检索框架_可运行工程包_V1.0》
 > 架构参考：《在线检索开发文档_V2.0.1》（存档）｜仓库定案：《检索服务独立仓库与qingxi接入方案_V1.0》（D1）
+>
+> **接口文档**：[docs/接口文档.md](../docs/接口文档.md)（检索服务全部 HTTP 接口，一份看完）
 
 ---
 
@@ -55,7 +57,9 @@ retrieval/
 │   ├── config.py               .env + config/*.yaml 双源；缺必需变量拒绝启动
 │   ├── api/
 │   │   ├── retrieval.py        POST /api/retrieval（SSE 主链 + 预算砍路）
-│   │   └── graph.py            GET /api/graph/subgraph（独立图谱页）
+│   │   ├── session.py          /api/sessions 会话 CRUD（Bearer token 身份隔离）
+│   │   ├── graph.py            GET /api/graph/subgraph（独立图谱页）
+│   │   └── eval.py             POST /api/eval/benchmark（离线测评，召回率+响应时间）
 │   ├── understand/query_parser.py   QRY-02：L1 正则 + L3 校验器（真实现）
 │   ├── recall/
 │   │   ├── vector_route.py     ① 路向量召回（dense / hybrid 双模）
@@ -66,6 +70,9 @@ retrieval/
 │   │   ├── rerank.py           精排（真服务 / 本地打分）
 │   │   └── parent_backfill.py  QRY-06 父块回捞（small-to-big）
 │   ├── generate/report.py      RPT 流式生成（OpenAI 兼容 SSE）
+│   ├── llm.py                 统一 LLM 调用接口（chat / chat_stream / chat_sync）
+│   ├── auth.py                记忆身份解析（passthrough / jwt）
+│   ├── memory/                记忆与会话（窗口 + 摘要 + mem0 事实，默认关）
 │   ├── degrade/                降级码字典 + 编排器 + 预算看门狗
 │   ├── trace/spans.py          TRACE 埋点 + trace_id 绑定（TTL 30min）
 │   ├── store/
@@ -103,6 +110,7 @@ retrieval/
 | Rerank | ✅ real 真服务 / fake 本地打分 | 超时直出 RRF 序 |
 | QRY-06 父块回捞 | ✅ 真实现 | PG 熔断用行内 content 兜底 |
 | RPT 流式生成 | ✅ 真流式 | 未配 LLM → `generation_unavailable`，不出正文（不编造） |
+| 记忆与会话（隔离 + 三层上下文） | ✅ 真实现 | 默认关；`token`/`session_id` 隔离，fail-closed（见 §八） |
 | 图谱页 subgraph | ✅ 真实现 | trace_id 绑定 + scope 二次校验 + 每条边带 evidence |
 | 降级编排 + 预算看门狗 | ✅ 真砍路 | >3.5s 砍重排 / >4.5s 砍图路，每砍必留痕 |
 | IF-2 证据 span | ✅ fake 有真值 | real 依赖离线切分产出，缺失时 `evidence_span_missing` |
@@ -140,6 +148,12 @@ endpoints:                         # 连哪里、怎么取字段
 2. 重建 Milvus collection —— dim 变了旧向量全部失效
 3. 重跑 seed：`python scripts/gen_seed.py --embed service`，再
    `python scripts/check_embed_space.py --expect real` 验收
+
+> ⚠️ **seed 通道必须与后端匹配（静默查空的头号坑）**：`data/seed/*.json` 是 fake 与 real **共用**的一份
+> （fake 运行时读它做内存三库，`seed_real.py` 也读它灌真库）。fake 后端 query 用 `hash_embedding`，
+> 故 seed 必须 `--embed hash`（`gen_seed.py` 默认）；real 后端需 `--embed service`（BGE-M3）。两者向量空间
+> 不兼容：fake 通道误用 service seed 会召回恒 0 且零报错（degrade/gate 测试会红）。哨兵 = `data/seed/meta.json`
+> 的 `embed_channel` 字段。切通道记得重跑对应 seed。
 
 **启动校验（防静默漂移）**：`real` 通道跑 hash 嵌入 = **拒绝启动**
 （宁可停机，不许"召回全是噪声还报绿"）。staging 要放行须显式
@@ -207,3 +221,24 @@ python scripts/check_llm_chain.py --backend hf \
 6. **配置不许绑定模拟数据**：算法参数在 `config/*.yaml`，`dev_overrides` 只允许放宽阈值/超时，
    禁止覆盖 RRF k / top_k 等语义参数（有测试守着）。
 7. **缺必需变量拒绝启动**，启动日志打印生效值（口令脱敏）。
+
+---
+
+## 八、记忆与会话接口（新增，默认关）
+
+`POST /api/retrieval` 请求体新增两个**可选**字段（其余契约不变，详见
+[docs/接口文档.md](../docs/接口文档.md) §1 / §3）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `session_id` | string? | 否 | 会话 id；记忆按 `(user_id, session_id)` 隔离多轮上下文 |
+| `token` | string? | 否 | 记忆身份令牌；缺省/解析失败 = 本轮跳过记忆 |
+
+三层记忆：**窗口 window**（PG，最近 N 轮原文）+ **摘要 summary**（PG，递归压缩）+
+**事实 memories**（mem0 → Milvus `mem0_memory`，长期跨会话）。全部 **fail-closed**——任何
+LLM/mem0/PG 失败只记 warning、该层留空，绝不阻断检索主链，也不进 `degraded[]`。
+
+- 开关：`MEMORY_ENABLED`（默认 `false`）；身份：`MEMORY_AUTH_MODE=passthrough|jwt` + `MEMORY_JWT_SECRET`。
+- `passthrough`（默认）= token 即 user_id（内网/测试，自报身份）；对外必须切 `jwt` 才有防伪隔离。
+- mem0 是**进程内库**（复用 Milvus + 统一 LLM 接口），不是独立服务，无需单独部署。
+- 统一 LLM 调用：`app/llm.py` 的 `chat` / `chat_stream` / `chat_sync`，配置复用 `GRAPHRAG_LLM_*`。

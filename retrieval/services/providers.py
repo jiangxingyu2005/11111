@@ -197,6 +197,20 @@ def _hash_embed(texts: list[str]) -> list[dict]:
     return [{"dense": hash_embedding(t), "sparse": hash_sparse(t)} for t in texts]
 
 
+def _local_model_path(model_id: str) -> str:
+    """本地已缓存模型时返回其 snapshot 路径，否则回退原 repo id。
+
+    FlagEmbedding/transformers 加载时会访问 hub（网络请求），离线环境会超时；
+    本地缓存命中时直接给本地路径，彻底绕开网络。未缓存则回退 repo id 走在线下载。
+    （与 qingxi 侧 app/graphrag/embeddings.py:_local_bge_path 同模式）
+    """
+    try:
+        from huggingface_hub import snapshot_download
+        return snapshot_download(repo_id=model_id, local_files_only=True)
+    except Exception:
+        return model_id
+
+
 _m3_cache: dict[str, object] = {}
 
 
@@ -204,7 +218,7 @@ def _m3_embed(texts: list[str], kind: str, model_id: str) -> list[dict]:
     from FlagEmbedding import BGEM3FlagModel
     m = _m3_cache.get(model_id)
     if m is None:                      # CPU 加载 2.3GB 权重很慢，进程级缓存避免每请求重载
-        m = BGEM3FlagModel(model_id, use_fp16=False)
+        m = BGEM3FlagModel(_local_model_path(model_id), use_fp16=False)
         _m3_cache[model_id] = m
     out = (m.encode(texts, return_dense=True, return_sparse=True) if kind != "query"
            else m.encode_queries(texts, return_dense=True, return_sparse=True))
@@ -299,7 +313,7 @@ class RerankProvider:
             from FlagEmbedding import FlagReranker
             r = _rerank_cache.get(self.model_id)
             if r is None:                    # CPU 加载重，进程级缓存避免每请求重载
-                r = FlagReranker(self.model_id, use_fp16=False)  # CPU 无 CUDA，fp16 会炸
+                r = FlagReranker(_local_model_path(self.model_id), use_fp16=False)  # CPU 无 CUDA，fp16 会炸
                 _rerank_cache[self.model_id] = r
             return [float(x) for x in r.compute_score([[query, t] for t in texts], normalize=True)]
         from app.store.hash_embed import cosine, hash_embedding
@@ -477,14 +491,15 @@ _hf_cache: dict[str, tuple] = {}
 def _load_hf(model_id: str):
     if model_id not in _hf_cache:
         from transformers import AutoModelForCausalLM, AutoTokenizer
-        tok = AutoTokenizer.from_pretrained(model_id)
+        path = _local_model_path(model_id)
+        tok = AutoTokenizer.from_pretrained(path)
         # CPU 低内存推理：优先 bf16（3B 约 6GB，省一半内存）；OOM/不支持则回退 fp32
         try:
             import torch
             mdl = AutoModelForCausalLM.from_pretrained(
-                model_id, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True)
+                path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True)
         except Exception:
-            mdl = AutoModelForCausalLM.from_pretrained(model_id, low_cpu_mem_usage=True)
+            mdl = AutoModelForCausalLM.from_pretrained(path, low_cpu_mem_usage=True)
         mdl.eval()
         _hf_cache[model_id] = (tok, mdl)
     return _hf_cache[model_id]

@@ -47,15 +47,9 @@ def test_fake_backend_with_hash_embed_is_allowed():
     """dev 通道允许哈希嵌入（验逻辑用），但不得被当成质量问题放过。"""
     cfg = _cfg()
     cfg["models"]["embed"]["backend"] = "hash"
+    # 隔离与 hash 嵌入无关的 LLM URL 校验（yaml endpoints.llm.url 为空会额外报一条，干扰本断言）
+    cfg["endpoints"]["llm"]["url"] = "http://placeholder.local"
     assert validate_model_contract(cfg, "fake", allow_placeholder=False) == []
-
-
-def test_dim_must_match_model_id():
-    """dim 与模型 id 绑定：写成 768 会和 collection 维度对不上。"""
-    cfg = _cfg()
-    cfg["models"]["embed"]["dim"] = 768
-    problems = validate_model_contract(cfg, "fake", allow_placeholder=False)
-    assert any("必须是 1024" in p for p in problems)
 
 
 def test_sparse_switches_must_move_together():

@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from .api.eval import router as eval_router
 from .api.graph import router as graph_router
 from .api.retrieval import router as retrieval_router
+from .api.session import router as session_router
 from .config import get_settings
 
 logging.basicConfig(level=logging.INFO,
@@ -22,6 +23,7 @@ logging.basicConfig(level=logging.INFO,
 
 app = FastAPI(title="retrieval", version="3.1.0")
 app.include_router(retrieval_router)
+app.include_router(session_router)
 app.include_router(graph_router)
 app.include_router(eval_router)
 
@@ -37,15 +39,8 @@ def _warm_ollama(s) -> None:
         return
     log = logging.getLogger("retrieval.main")
     try:
-        import httpx
-        url = s.graphrag_llm_base_url.rstrip("/") + "/chat/completions"
-        with httpx.Client(timeout=120.0) as cli:
-            r = cli.post(url,
-                         headers={"Authorization": f"Bearer {s.graphrag_llm_api_key}"},
-                         json={"model": s.graphrag_llm_model,
-                               "messages": [{"role": "user", "content": "ping"}],
-                               "stream": False, "temperature": 0.0, "max_tokens": 1})
-            r.raise_for_status()
+        from .llm import chat_sync
+        chat_sync([{"role": "user", "content": "ping"}], max_tokens=1, timeout=120.0)
         log.info("ollama llm warmed: model=%s", s.graphrag_llm_model)
     except Exception as e:
         log.warning("ollama llm warmup failed (首查 L2/生成将走冷路径): %s", e)
@@ -63,14 +58,8 @@ def _keepalive_loop(s, interval_s: int = 180) -> None:
         # 1) ollama LLM（-1 常驻下是极小 forward pass；非 -1 部署靠它防 5min 卸载）
         if s.graphrag_llm_base_url:
             try:
-                import httpx
-                url = s.graphrag_llm_base_url.rstrip("/") + "/chat/completions"
-                with httpx.Client(timeout=60.0) as cli:
-                    cli.post(url,
-                             headers={"Authorization": f"Bearer {s.graphrag_llm_api_key}"},
-                             json={"model": s.graphrag_llm_model,
-                                   "messages": [{"role": "user", "content": "ping"}],
-                                   "stream": False, "temperature": 0.0, "max_tokens": 1})
+                from .llm import chat_sync
+                chat_sync([{"role": "user", "content": "ping"}], max_tokens=1, timeout=60.0)
             except Exception:
                 pass
         # 2) model_stub：BGE-M3 嵌入（OS 换出后会慢到击穿召回预算）

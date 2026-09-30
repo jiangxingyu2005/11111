@@ -22,10 +22,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.config import get_settings  # noqa: E402
+from app.config import embed_dim, get_settings  # noqa: E402
 from app.store.hash_embed import NUM_DIM  # noqa: E402
 
-DIM = 1024   # BGE-M3 dense 维度
+DIM = embed_dim()   # BGE-M3 dense 维度（单一事实源 config/retrieval.yaml:models.embed.dim）
 
 
 def build_chunk_schema(client, with_sparse: bool, with_secondary: bool):

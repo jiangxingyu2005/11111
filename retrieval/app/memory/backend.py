@@ -9,12 +9,21 @@ fail-closed：任何 mem0/嵌入/LLM 异常记 warning、返回空，绝不拖�
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from typing import Protocol, runtime_checkable
 
-from ..config import effective_cfg, get_settings
+from ..config import effective_cfg, get_settings, embed_dim
 
 log = logging.getLogger("retrieval.memory.backend")
+
+# mem0 的 telemetry 默认开启，其 telemetry 块会把 vector_store 配置二次实例化
+# （MilvusDBConfig(**model_dump())）；而 mem0 把 MilvusDBConfig.token 错写成非 Optional 的
+# str（默认 None），model_dump() 出的 token=None 被 pydantic 判成非法字符串抛 ValidationError，
+# 直接炸掉整个 _build()。mem0 读的是 os.environ（进程环境，非 .env），故必须在首次
+# `from mem0 import Memory` 之前在此关闭 telemetry（项目本就禁止外发数据），绕过该块。
+os.environ.setdefault("MEM0_TELEMETRY", "false")
 
 
 @runtime_checkable
@@ -81,15 +90,24 @@ class FakeMemoryBackend:
 
 
 class Mem0Backend:
-    """mem0 长期记忆（自托管 AsyncMemory + Milvus + 本地 Ollama/BGE-M3）。"""
+    """mem0 长期记忆（自托管 Memory + Milvus + 本地 BGE-M3 / DeepSeek LLM）。
+
+    全程 to_thread：加载 2.2GB 本地 BGE-M3 与 encode 都在 worker 线程跑，绝不阻塞事件循环
+    （否则首查 load_context 会卡住整条 SSE 主链，与「记忆 fail-closed 不拖主链」纪律相悖）。
+    """
 
     def __init__(self) -> None:
         self._mem = None
 
-    async def _get(self):
-        if self._mem is not None:
-            return self._mem
-        from mem0 import AsyncMemory  # 懒加载：仅 real 通道才需要 mem0ai
+    def _local_embed_model(self) -> str:
+        """本地 BGE-M3 snapshot 优先（ModelScope 缓存，免联网）；无则回退声明模型名（联网下载）。"""
+        from ..config import ROOT
+        p = ROOT / "model" / "models" / "BAAI--bge-m3" / "snapshots" / "master"
+        return str(p) if p.is_dir() else get_settings().graphrag_embedding_model
+
+    def _build(self):
+        """同步构建 mem0（在 worker 线程内执行，加载大模型不阻塞事件循环）。"""
+        from mem0 import Memory  # 懒加载：仅 real 通道才需要 mem0ai
 
         s = get_settings()
         mc = (effective_cfg().get("memory") or {}).get("mem0", {}) or {}
@@ -98,12 +116,16 @@ class Mem0Backend:
                 "provider": mc.get("vector_store", "milvus"),
                 "config": {
                     "collection_name": mc.get("collection", "mem0_memory"),
-                    "uri": s.milvus_uri,
+                    # mem0>=2.x 字段名是 url（旧版 uri 已被移除，多余字段会被 pydantic 直接拒绝）
+                    "url": s.milvus_uri,
+                    # 必须显式给维度：mem0 默认 1536，与 BGE-M3 的 1024 错位会导致建库即炸
+                    "embedding_model_dims": embed_dim(),
+                    # 与检索侧统一余弦量纲（bge-m3 归一化后 L2/COSINE 排序等价，语义一致更清晰）
+                    "metric_type": "COSINE",
                 },
             },
-            # LLM 走本地 Ollama/vLLM 的 OpenAI 兼容端点（graphrag_llm_base_url 约定已含 /v1，
-            # 同 report.py 直接拼 /chat/completions；mem0 的 openai SDK 会在 base_url 后拼 /chat/completions，
-            # 故此处不能再 +"/v1"，否则变 /v1/v1）
+            # LLM 走 OpenAI 兼容端点（线上 DeepSeek 或本地 Ollama），由 .env 的 GRAPHRAG_LLM_* 决定。
+            # openai SDK 会在 base_url 后拼 /chat/completions，故此处不能再 +"/v1"，否则变 /v1/v1。
             "llm": {
                 "provider": "openai",
                 "config": {
@@ -112,18 +134,20 @@ class Mem0Backend:
                     "api_key": s.graphrag_llm_api_key or "EMPTY",
                 },
             },
-            # embedder 本地化（已定案）：huggingface provider 进程内 sentence-transformers
-            # 跑 graphrag_embedding_model（BAAI/bge-m3），与离线 qingxi 侧同模型同空间（1024 维），零外联。
-            # 注意：不能复用 retrieval_embed_url——那是自定义 /embed 协议（body {texts:[]}），
-            # 非 OpenAI 兼容，喂给 mem0 的 openai embedder 会请求失败/维度错。
+            # embedder 本地化：huggingface provider 进程内 sentence-transformers 跑本地 BGE-M3。
+            # 不能复用 retrieval_embed_url——那是自定义 /embed 协议（body {texts:[]}），非 OpenAI 兼容。
             "embedder": {
                 "provider": "huggingface",
                 "config": {
-                    "model": s.graphrag_embedding_model,
+                    "model": self._local_embed_model(),
                 },
             },
         }
-        self._mem = AsyncMemory.from_config(config_dict=config)
+        return Memory.from_config(config_dict=config)
+
+    async def _get(self):
+        if self._mem is None:
+            self._mem = await asyncio.to_thread(self._build)
         return self._mem
 
     @staticmethod
@@ -134,14 +158,15 @@ class Mem0Backend:
     async def add(self, user_id: str, messages: list[dict]) -> None:
         try:
             m = await self._get()
-            await m.add(messages, user_id=user_id)
+            await asyncio.to_thread(m.add, messages, user_id=user_id)
         except Exception as e:
             log.warning("mem0 add failed (视为未写入): %s", e)
 
     async def search(self, query: str, user_id: str, k: int = 5) -> list[str]:
         try:
             m = await self._get()
-            return self._extract(await m.search(query, user_id=user_id, limit=k))
+            res = await asyncio.to_thread(m.search, query, filters={"user_id": user_id}, top_k=k)
+            return self._extract(res)
         except Exception as e:
             log.warning("mem0 search failed (返回空): %s", e)
             return []
@@ -149,7 +174,8 @@ class Mem0Backend:
     async def get_all(self, user_id: str) -> list[str]:
         try:
             m = await self._get()
-            return self._extract(await m.get_all(user_id=user_id))
+            res = await asyncio.to_thread(m.get_all, filters={"user_id": user_id})
+            return self._extract(res)
         except Exception as e:
             log.warning("mem0 get_all failed (返回空): %s", e)
             return []
