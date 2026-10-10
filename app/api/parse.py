@@ -31,7 +31,7 @@ from ..utils.kb import get_kb
 from ..utils.mineru_client import MinerUError, extract_page_count, mineru_client
 from ..utils.minio_client import upload_clean, upload_source
 from ..utils.paddle_ocr import recognize_text as paddle_recognize_text
-from ..utils.scoring import score_markdown_total
+from ..utils.scoring import noise_ratio, score_markdown_total
 from ..utils.storage import ensure_dirs, save_result
 from ..utils.html_parser import parse_html_to_markdown
 from ..utils.iq import process_iq_h5
@@ -162,11 +162,18 @@ async def _finalize(
 
     # GraphRAG 入库(ems_graphrag 融合:清洗 md -> PG 父/子块 -> Milvus -> Neo4j)
     # IQ 不入图谱;失败仅记日志,不影响 parse 结果(documents.in_kb 保持 False)
+    # 低质/乱码:仍切块进 Milvus 可检索,不抽实体(in_kb 保持 False)
     if settings.graphrag_enabled and engine != "iq":
+        noise = noise_ratio(clean_md)
+        q = file_score if isinstance(file_score, (int, float)) else 0.0
+        graph = q >= settings.score_q_quarantine and noise < settings.score_noise_quarantine
+        if not graph:
+            logger.info("噪声/低质隔离不抽图谱: file=%s score=%.4f noise=%.4f", filename, q, noise)
         try:
-            await ingest_document(kb_id, str(file_id), clean_md, engine, filename)
-            async with SessionLocal() as db:
-                await mark_document_in_kb(db, file_id)
+            await ingest_document(kb_id, str(file_id), clean_md, engine, filename, graph=graph)
+            if graph:
+                async with SessionLocal() as db:
+                    await mark_document_in_kb(db, file_id)
         except Exception as e:
             logger.warning("GraphRAG 入库失败(doc_id=%s engine=%s): %s", file_id, engine, e)
 

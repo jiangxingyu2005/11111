@@ -1,13 +1,10 @@
-"""实体消歧解析引擎:三阶段匹配(①确定性 ②向量 ③LLM 灰区)接到真实 PG/Milvus/Neo4j。
+"""实体消歧:接到真实 PG/Milvus/Neo4j。
 
 - resolve_deterministic:名称/别名/指纹查 entity_registry(类型作用域)。
-- resolve_vector:实体名向量查 Milvus ems_entities(类型作用域,COSINE),只找候选,LLM 判断同一才合并。
+- resolve_vector:向量只找候选;属性冲突否决;LLM 双向判同且置信度够才合并,否则记疑似。
 - align:抽取结果对齐到全局 canonical(原地 remap entity_id + 关系 head/tail,自环丢弃)。
 - persist:canonical 实体写回 entity_registry + ems_entities(幂等,name 首现者赢、aliases 并集)。
-- global_resolve:全图批量对账(DSU 求 canonical + 四层回填 PG/Neo4j/Milvus)。
-
-纯逻辑已由 disambig/engine.py 离线验证(16/16),本模块是其生产实现;向量层/灰区/对账
-为其生产化落地,与 disambig 三阶段管道一一对应。
+- global_resolve:全图批量对账(DSU 求 canonical + 回填 PG/Neo4j/Milvus)。
 """
 
 from __future__ import annotations

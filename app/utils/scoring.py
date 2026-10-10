@@ -33,6 +33,16 @@ _ENTITY_PATTERNS = [
 _HEADING_SPLIT_RE = re.compile(r"\n(?=#{1,3}\s)")
 # 内联 base64 图片(如 ![](data:image/jpeg;base64,...)),切块前剥离
 _INLINE_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(data:image/[^)]*\)")
+# OCR/编码噪声:替换符、经典乱码块、三连叠字、汉字中间插怪标点、型号里夹汉字
+_GARBAGE_RE = re.compile(r"�|烫+|锟斤拷")
+_STACKED_CJK_RE = re.compile(r"([一-鿿])\1{2,}")
+_PUNCT_IN_WORD_RE = re.compile(r"[一-鿿][—_$§?]{1,4}[一-鿿]")
+_CJK_IN_CODE_RE = re.compile(r"\d[一-鿿]{1,2}\d")  # 苏-5积7, 不要误伤 C波段SAR
+_MULTI_PUNCT_RE = re.compile(r"[，,。.]{2,}")
+_SENT_SPLIT_RE = re.compile(r"[。！？\n]+")
+_NOISE_CHAR_RE = re.compile(r"�|烫|锟|拷|§|\$")
+_DUP_CJK_PAIR_RE = re.compile(r"([一-鿿])\1([一-鿿])")  # 装装备 / 信息息化, 排除叠词需看第三字不同
+
 
 # jieba 可选依赖:未安装时 content 维度降级为信息密度近似
 try:
@@ -106,6 +116,44 @@ def _is_table_separator(text: str) -> bool:
 def _strip_inline_images(md_text: str) -> str:
     """移除内联 base64 图片(无文本价值,且会污染长度/信息密度维度)。"""
     return _INLINE_IMAGE_RE.sub("", md_text)
+
+
+def is_garbled_name(name: str) -> bool:
+    """实体名是否像 OCR 噪声(烫/锟/替换符/叠字/型号夹汉字)。"""
+    s = str(name or "").strip()
+    if not s:
+        return False
+    if _GARBAGE_RE.search(s) or "�" in s:
+        return True
+    if _STACKED_CJK_RE.search(s) or _PUNCT_IN_WORD_RE.search(s) or _CJK_IN_CODE_RE.search(s):
+        return True
+    return False
+
+
+def _sentence_noisy(sent: str) -> bool:
+    if _NOISE_CHAR_RE.search(sent) or _GARBAGE_RE.search(sent):
+        return True
+    if _PUNCT_IN_WORD_RE.search(sent) or _MULTI_PUNCT_RE.search(sent):
+        return True
+    if _STACKED_CJK_RE.search(sent) or _CJK_IN_CODE_RE.search(sent):
+        return True
+    return False
+
+
+def noise_ratio(text: str) -> float:
+    """文档乱码分 0~1:含烫/锟/替换符、词中怪标点、叠字、近重复句的句子占比。"""
+    s = text or ""
+    sents = [x.strip() for x in _SENT_SPLIT_RE.split(s) if len(x.strip()) >= 8]
+    if not sents:
+        return 1.0 if _NOISE_CHAR_RE.search(s) else 0.0
+    noisy = sum(1 for sent in sents if _sentence_noisy(sent))
+    keys: dict[str, int] = {}
+    for sent in sents:
+        key = re.sub(r"[^一-鿿A-Za-z0-9]", "", sent)[:18]
+        if key:
+            keys[key] = keys.get(key, 0) + 1
+    dup = sum(v - 1 for v in keys.values() if v > 1) / len(sents)
+    return round(min(noisy / len(sents) + 0.4 * dup, 1.0), 4)
 
 
 def score(

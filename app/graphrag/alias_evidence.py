@@ -24,6 +24,11 @@ _CODE_RE = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{2,4}(?:/[A-Za-z]{2,4})?-\d{1,4
 _CODE_TYPES = {"辐射源", "平台", "武器"}
 
 
+def iter_model_codes(text: str) -> list[str]:
+    """原文里出现的型号编码(保持写法,不去重归一)。"""
+    return _CODE_RE.findall(text or "")
+
+
 def model_codes(texts: list) -> set[str]:
     """从名称/型号/别名里取型号编码(归一化),如 {"mgm-140"}、{"9k720"}、{"an/tpq-50"}。"""
     out: set[str] = set()

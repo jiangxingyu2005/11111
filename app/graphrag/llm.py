@@ -124,36 +124,26 @@ class LLMClient:
     def _extract_entities_openai(self, text, entity_types, entity_defs):
         client = self._client()
         llm_cfg = self.settings["llm"]
-        # 逐类硬约束:每类一个 function,该类的 json_schema 直接作为 properties 的 schema。
-        if entity_defs:
-            all_entities = []
-            for d in entity_defs:
-                name = d.get("name", "")
-                result = _call_function(
-                    client, llm_cfg, "extract_entities",
-                    _entity_type_instruction(name, d), text,
-                    _entity_function_schema(d.get("json_schema")),
-                )
-                for e in result.get("entities", []):
-                    if isinstance(e, dict):
-                        e["entity_type"] = name  # 类型由本次调用固定,回填给校验/归一化
-                        all_entities.append(e)
-            return all_entities
-        # 无逐类定义 -> 退回单次调用(类型由 entity_types 列表描述)
+        types = list(entity_types or [])
+        if not types and entity_defs:
+            types = [d.get("name", "") for d in entity_defs if d.get("name")]
+        type_field = {"type": "string", "enum": types} if types else {"type": "string"}
         schema = {
             "type": "object",
             "properties": {"entities": {
                 "type": "array",
                 "items": {"type": "object", "properties": {
-                    "name": {"type": "string"}, "entity_type": {"type": "string"},
+                    "name": {"type": "string"}, "entity_type": type_field,
                     "aliases": {"type": "array", "items": {"type": "string"}},
                     "properties": {"type": "object"}, "confidence": {"type": "number"},
                 }, "required": ["name", "entity_type", "confidence"]},
             }},
             "required": ["entities"],
         }
-        return _call_function(client, llm_cfg, "extract_entities",
-                              _entity_instruction(entity_types, None), text, schema)["entities"]
+        instruction = _entity_instruction(types, entity_defs)
+        instruction += ("原文标题、型号编码、书名号内名称、以及「型号 XXX」必须抽成实体,"
+                        "中文称呼写入 aliases,不要只留编码丢掉中文名。没有的类型不要编造。")
+        return _call_function(client, llm_cfg, "extract_entities", instruction, text, schema)["entities"]
 
     def _extract_relations_openai(self, text, entities, relation_types, fewshot, context=None):
         # rel_type 加 enum 硬约束:模型只能输出已定义关系类型的英文标识(不必拆多次调用)。
@@ -364,37 +354,6 @@ def _relation_instruction(entity_names: list, relation_types: list) -> str:
     return (f"从实体 {entity_names} 中抽取关系，关系类型限定如下"
             f"（rel_type 字段用括号内英文标识；head/tail 方向严格按说明里括号中的方向）：\n"
             + "\n".join(lines))
-
-
-def _entity_function_schema(json_schema: Optional[dict]) -> dict:
-    """单类型实体的 function-calling schema:该类型 json_schema 硬约束 properties 结构。"""
-    props = dict(json_schema) if isinstance(json_schema, dict) else {"type": "object"}
-    return {
-        "type": "object",
-        "properties": {"entities": {
-            "type": "array",
-            "items": {"type": "object", "properties": {
-                "name": {"type": "string"},
-                "aliases": {"type": "array", "items": {"type": "string"}},
-                "properties": props,
-                "confidence": {"type": "number"},
-            }, "required": ["name", "confidence"]},
-        }},
-        "required": ["entities"],
-    }
-
-
-def _entity_type_instruction(name: str, d: dict) -> str:
-    """单类型实体抽取指令(每类一个 function,类型由指令固定)。"""
-    desc = d.get("description", "")
-    js = d.get("json_schema")
-    tail = ("每个实体只输出一次，不要重复；实体名不能为空，属性按给定的 properties 结构填写。"
-            + _PARAM_RULE)
-    line = (f"从文本中抽取「{name}」类型的实体" + (f"（{desc}）" if desc else "")
-            + f"。只输出确实属于「{name}」类型的实体，其他类型的实体不要输出，没有就返回空列表")
-    if js:
-        line += f"\n该类型属性字段(properties 按此结构填)：{json.dumps(js, ensure_ascii=False)}"
-    return f"{line}。\n{tail}"
 
 
 # ====================================================================

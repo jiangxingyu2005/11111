@@ -84,8 +84,9 @@ class Settings(BaseSettings):
     # 打分(文本质量评分阈值与权重)
     score_min_chunk_len: int = 20      # 长度维度下界(字符),块短于此则长度分记 0
     score_max_chunk_len: int = 512     # 长度维度上界(字符),块长于此则长度分记满
-    score_q_quarantine: float = 0.4    # 质量分隔离阈值,低于此分不分级保留
+    score_q_quarantine: float = 0.4    # 质量分隔离阈值,低于此分不抽图谱(仍切块检索)
     score_q_keep: float = 0.6          # 质量分保留阈值,高于此分按高权重
+    score_noise_quarantine: float = 0.12  # 乱码分隔离阈值,高于此分不抽图谱(OCR 噪声 txt)
     score_w_len: float = 0.25          # 长度维度权重
     score_w_info: float = 0.30         # 信息密度维度权重
     score_w_content: float = 0.25      # 内容词占比维度权重

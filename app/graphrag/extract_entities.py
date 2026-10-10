@@ -14,12 +14,14 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import PendingExtraction
+from ..utils.scoring import is_garbled_name
 from . import db
 from .config import get
 from .alias_evidence import add_alias_evidence
 from .coref import merge_mentions
 from .ids import canonical_entity_id, normalize_name
 from .llm import LLMClient
+from .mentions import cover_mentions
 from .models import Entity
 
 # 需求(10):频率/脉宽/重频/调制等是「属性」不是实体。名字只是参数值的,拒收进 pending。
@@ -48,6 +50,8 @@ def _validate(raw: dict, allowed_types: list) -> list[str]:
         errors.append("name 为空")
     elif _is_param_value(name):
         errors.append(f"参数值不是实体: {name!r}(应写入所属实体 properties)")
+    elif is_garbled_name(str(name)):
+        errors.append(f"实体名含乱码,丢弃: {name!r}")
     if not etype or str(etype).strip() not in allowed_types:
         errors.append(f"entity_type 非法: {etype!r}")
     if conf is None or not isinstance(conf, (int, float)) or not (0.0 <= conf <= 1.0):
@@ -106,7 +110,10 @@ async def extract(session: AsyncSession, llm: Optional[LLMClient], parents: list
 
     registry: dict[str, Entity] = {}          # entity_id -> Entity(归一化注册表)
     for p in parents:
-        raw_list = await asyncio.to_thread(llm.extract_entities, p.get("content", ""),
+        title = (p.get("title") or "").strip()
+        body = p.get("content", "") or ""
+        text = f"{title}\n{body}" if title and title != "无标题" else body
+        raw_list = await asyncio.to_thread(llm.extract_entities, text,
                                            allowed_types, entity_defs)
         for raw in raw_list:
             # 小模型(如 ollama qwen2.5:3b)偶发漏 confidence 字段,默认中档置信,不因此丢实体
@@ -136,6 +143,10 @@ async def extract(session: AsyncSession, llm: Optional[LLMClient], parents: list
                     if a not in registry[eid].aliases:
                         registry[eid].aliases.append(a)
     entities = await _resolve_type_conflicts(session, list(registry.values()))
+    # 提及覆盖:标题/型号编码/装备专名必须落在某实体上,LLM 漏了就规则补节点
+    entities, cover_notes = cover_mentions(entities, parents, allowed_types)
+    for note in cover_notes:
+        await db.insert(session, PendingExtraction, note)
     # 指代消解(实体侧):「雷达」这类代称并回前文全名实体,不单独成节点
     entities, notes = merge_mentions(entities, parents)
     for note in notes:

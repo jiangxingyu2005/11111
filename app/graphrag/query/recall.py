@@ -21,6 +21,11 @@ _SPLIT_RE = re.compile(r"[\s/、,，;；()（）]+")
 _MIN_KEY_LEN = 3   # 太短的片段(如「M」)不单独当匹配键,避免误命中
 
 
+def _fold(s: str) -> str:
+    """匹配用:去掉连字符/下划线,让 NH-90 能对上 NH90。不改入库 ID。"""
+    return s.replace("-", "").replace("_", "")
+
+
 def _match_keys(names: list[str]) -> set[str]:
     """实体名/别名 -> 匹配键:全名 + 按空格/斜杠等切出的片段(归一化后)。"""
     keys: set[str] = set()
@@ -32,7 +37,8 @@ def _match_keys(names: list[str]) -> set[str]:
             p = normalize_name(part)
             if len(p) >= _MIN_KEY_LEN:
                 keys.add(p)
-    return {k for k in keys if k}
+    folded = {_fold(k) for k in keys}
+    return {k for k in (keys | folded) if k}
 
 
 def match_entities(query: str, entities: list[dict]) -> list[str]:
@@ -40,16 +46,16 @@ def match_entities(query: str, entities: list[dict]) -> list[str]:
 
     入库时实体 name 已经 normalize_name 小写化,查询侧同样归一化后再做子串匹配,
     否则「2.4GHz」永远匹配不到实体「2.4ghz」。别名里的原始型号写法会切成片段,
-    让「ATACMS导弹」能命中实体「MGM-140 ATACMS」。
+    让「ATACMS导弹」能命中实体「MGM-140 ATACMS」。连字符在匹配时折叠,NH-90 能对上 NH90。
     """
-    q = normalize_name(query)
+    q = _fold(normalize_name(query))
     hits = []
     for e in entities:
         names = [e.get("name", "")] + list(e.get("aliases") or [])
         model = _props(e.get("properties")).get("型号")
         if model:
             names.append(str(model))
-        if any(k in q for k in _match_keys(names)):
+        if any(_fold(k) in q for k in _match_keys(names)):
             hits.append(e["entity_id"])
     return hits
 
