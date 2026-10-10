@@ -32,13 +32,17 @@ class LLMClient:
     # ---- 阶段二:关系抽取(实体对 + 证据句)----
     def extract_relations(self, text: str, entities: list[dict],
                           relation_types: Optional[list] = None,
-                          fewshot: Optional[list] = None) -> list[dict]:
+                          fewshot: Optional[list] = None,
+                          context: Optional[str] = None) -> list[dict]:
+        """context:本节路径 + 前文主体(指代消解用),拼在指令末尾。"""
         if self.is_llm:
-            return self._extract_relations_openai(text, entities, relation_types or [], fewshot)
+            return self._extract_relations_openai(text, entities, relation_types or [], fewshot, context)
         return _mock_extract_relations(text, entities, relation_types or [])
 
     def generate_answer(self, question: str, contexts: list[dict],
                         graph_facts: Optional[list] = None) -> str:
+        if not contexts and not graph_facts:
+            return NO_EVIDENCE_ANSWER   # 无证据不调 LLM,防止凭模型记忆作答
         if self.is_llm:
             return self._answer_openai(question, contexts, graph_facts)
         return _mock_answer(question, contexts)
@@ -49,6 +53,9 @@ class LLMClient:
 
         返回同步 generator,由调用方经 asyncio.to_thread 逐步拉取,不阻塞事件循环。
         """
+        if not contexts and not graph_facts:
+            yield NO_EVIDENCE_ANSWER
+            return
         if not self.is_llm:
             yield _mock_answer(question, contexts)
             return
@@ -123,7 +130,7 @@ class LLMClient:
         return _call_function(client, llm_cfg, "extract_entities",
                               _entity_instruction(entity_types, None), text, schema)["entities"]
 
-    def _extract_relations_openai(self, text, entities, relation_types, fewshot):
+    def _extract_relations_openai(self, text, entities, relation_types, fewshot, context=None):
         # rel_type 加 enum 硬约束:模型只能输出已定义关系类型的英文标识(不必拆多次调用)。
         rel_type_field = {"type": "string"}
         en_types = [r.get("en", "") for r in relation_types if r.get("en")]
@@ -145,6 +152,8 @@ class LLMClient:
         instruction = _relation_instruction(entity_names, relation_types)
         if fewshot:
             instruction += f"\n\n关系判定示例：\n{fewshot}"
+        if context:
+            instruction += f"\n\n{context}"
         return _call_function(self._client(), self.settings["llm"], "extract_relations",
                               instruction, text, schema)["relations"]
 
@@ -158,10 +167,15 @@ class LLMClient:
         return resp.choices[0].message.content
 
 
+# 需求(8)可解释输出:只能依据检索到的资料作答,不得用模型自身知识补全
+NO_EVIDENCE_ANSWER = "知识库中未检索到与该问题相关的资料，无法作答。"
+
+
 def _answer_messages(question: str, contexts: list[dict],
                      graph_facts: Optional[list] = None) -> list[dict]:
     """组装回答 prompt:图关系事实(若有)+ 参考子块 + 问题。非流式/流式共用。"""
-    system = "你是电磁信号情报助手，回答需引用来源编号。"
+    system = ("你是电磁信号情报助手。只能依据下面给出的图谱关系事实和参考资料作答，"
+              "回答需引用来源编号；资料中没有的信息不要补充，资料不足时直接说明资料中未提及。")
     parts: list[str] = []
     if graph_facts:
         parts.append("图谱关系事实（结构化的实体-关系，可直接据以回答）：\n"
@@ -253,8 +267,8 @@ def _output_example(name: str) -> str:
     示例字段与 _extract_*_openai 的 schema 一一对应;小模型按示例的扁平结构输出即可。
     """
     if name == "extract_entities":
-        return ('{"entities": [{"name": "AN/TPQ-50", "entity_type": "辐射源", '
-                '"aliases": [], "properties": {}, "confidence": 0.9}]}')
+        return ('{"entities": [{"name": "AN/TPQ-50", "entity_type": "辐射源", "aliases": [], '
+                '"properties": {"粒度": "型号", "频段": "X波段"}, "confidence": 0.9}]}')
     if name == "extract_relations":
         return ('{"relations": [{"head": "AN/TPQ-50", "tail": "地面车载平台", '
                 '"rel_type": "EQUIPPED_ON", "confidence": 0.9, "evidence": "装备于地面车载平台"}]}')
@@ -283,11 +297,18 @@ def _parse_json(raw: str) -> dict:
     return json.loads(block)
 
 
+# 需求(10):频率/脉宽/重频是实体的属性;粒度区分型号节点(需求5)与具体个体
+_PARAM_RULE = ("频率、频段、脉宽、重频、带宽、调制方式等参数值不是实体，"
+               "必须写进它所属实体的 properties(如 某辐射源 的 properties: {\"频率\": \"9.4GHz\", \"调制方式\": \"LFM\"})。"
+               "辐射源/平台/武器填写粒度：泛指某型装备为「型号」，指具体某一部/艘/架为「个体」。")
+
+
 def _entity_instruction(entity_types: Optional[list], entity_defs: Optional[list]) -> str:
     """实体抽取指令:有完整定义(entity_defs)时讲清每类含义与属性 schema,否则退回类型名列表。"""
     tail = ("注意：实体类型只能从上述列表中选择，禁止用报告字段名(如国别/制造商/频段/体制/用途)当类型；"
-            "字段名对应的值按语义归入上述类型(如国别/制造商/部队名→组织，装备型号→辐射源)。"
-            "每个实体只输出一次，不要重复。")
+            "字段名对应的值按语义归入上述类型(如国别/制造商/部队名→组织，雷达等发射装备型号→辐射源，"
+            "导弹等打击武器→武器，舰艇/飞机/发射车→平台)。"
+            + _PARAM_RULE + "每个实体只输出一次，不要重复。")
     if entity_defs:
         lines = []
         for d in entity_defs:
@@ -314,7 +335,8 @@ def _relation_instruction(entity_names: list, relation_types: list) -> str:
             line += f"\n  该关系属性字段(按此结构填)：{json.dumps(js, ensure_ascii=False)}"
         lines.append(line)
     return (f"从实体 {entity_names} 中抽取关系，关系类型限定如下"
-            f"（rel_type 字段用括号内英文标识）：\n" + "\n".join(lines))
+            f"（rel_type 字段用括号内英文标识；head/tail 方向严格按说明里括号中的方向）：\n"
+            + "\n".join(lines))
 
 
 def _entity_function_schema(json_schema: Optional[dict]) -> dict:
@@ -339,8 +361,10 @@ def _entity_type_instruction(name: str, d: dict) -> str:
     """单类型实体抽取指令(每类一个 function,类型由指令固定)。"""
     desc = d.get("description", "")
     js = d.get("json_schema")
-    tail = "每个实体只输出一次，不要重复；实体名不能为空，属性按给定的 properties 结构填写。"
-    line = f"从文本中抽取「{name}」类型的实体" + (f"（{desc}）" if desc else "")
+    tail = ("每个实体只输出一次，不要重复；实体名不能为空，属性按给定的 properties 结构填写。"
+            + _PARAM_RULE)
+    line = (f"从文本中抽取「{name}」类型的实体" + (f"（{desc}）" if desc else "")
+            + f"。只输出确实属于「{name}」类型的实体，其他类型的实体不要输出，没有就返回空列表")
     if js:
         line += f"\n该类型属性字段(properties 按此结构填)：{json.dumps(js, ensure_ascii=False)}"
     return f"{line}。\n{tail}"
@@ -353,7 +377,7 @@ def _entity_type_instruction(name: str, d: dict) -> str:
 def _mock_extract_entities(text: str, entity_types: list) -> list[dict]:
     """mock 实体抽取:恒返回空。
 
-    当前受控本体 10 类(原始信号/信号样本/信号簇/辐射源/平台/组织/工作状态/目标/事件/情报产品)
+    当前受控本体 11 类(原始信号/信号样本/信号簇/辐射源/平台/组织/工作状态/目标/事件/情报产品/武器)
     均无确定性正则,无法离线规则抽取,实体抽取需真 LLM(provider=openai/qwen)。
     保留此 stub 仅为维持 extract_entities 非 LLM 分支的调用签名一致。
     """

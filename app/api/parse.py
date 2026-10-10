@@ -1,6 +1,9 @@
+import csv
+import io
 import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, status
@@ -37,6 +40,44 @@ from ..utils.video import dedupe_frames, extract_frames
 router = APIRouter()
 
 logger = logging.getLogger(__name__)
+
+_PLAIN_EXTS = {".txt", ".md", ".csv"}
+
+
+def _decode_text(content: bytes) -> str:
+    for enc in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            return content.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return content.decode("utf-8", errors="replace")
+
+
+_CSV_TITLE_COLS = ("型号", "名称", "name")
+
+
+def _csv_to_markdown(text: str) -> str:
+    """CSV -> 每行一节:标题为型号/名称,正文为「字段：值」单行(只留非空字段)。
+
+    原样 CSV 里表头和数据相隔很远,宽表(几十列、大半为空)时 LLM 会把值对错列
+    (实测把 弹头kg 的 480-700 当成射程)。转成 字段：值 后每个值紧挨字段名。
+    整行写成一行:clean() 会删全局重复的短行与重复行,逐字段分行(如「国别：美国」)会被误删。
+    """
+    rows = list(csv.reader(io.StringIO(text)))
+    if len(rows) < 2:
+        return text
+    header = [h.strip() for h in rows[0]]
+    title_col = next((i for i, h in enumerate(header) if h in _CSV_TITLE_COLS), 0)
+    out: list[str] = []
+    for n, row in enumerate(rows[1:], 1):
+        pairs = [(header[i], v.strip()) for i, v in enumerate(row)
+                 if i < len(header) and header[i] and v.strip()]
+        if not pairs:
+            continue
+        title = (row[title_col].strip() if title_col < len(row) else "") or f"第{n}行"
+        out.append(f"## {title}")
+        out.append("；".join(f"{k}：{v}" for k, v in pairs) + "。")
+    return "\n".join(out) + "\n" if out else text
 
 
 async def _require_kb(kb_id: UUID) -> None:
@@ -261,6 +302,19 @@ async def parse(
             continue
 
         try:
+            suffix = Path(filename).suffix.lower()
+            if suffix in _PLAIN_EXTS:
+                raw_md = _decode_text(content)
+                if suffix == ".csv":
+                    raw_md = _csv_to_markdown(raw_md)
+                raw_entry = {"engine": "plain"}
+                results.append(
+                    await _finalize(
+                        kb_id, filename, content, raw_md, raw_entry,
+                        None, "plain", return_content,
+                    )
+                )
+                continue
             raw_md, raw_entry = await mineru_client.parse_file(filename, content)
             results.append(
                 await _finalize(

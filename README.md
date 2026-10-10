@@ -2,7 +2,20 @@
 
 FastAPI 服务:统一接收 `pdf / txt / csv / docx` 等文件上传,转发给本地 Docker 里的 MinerU 解析,再做一轮清洗,落盘为 md/json。详细设计见 [docs/方案.md](docs/方案.md)。
 
-## 快速启动
+## Docker 全栈启动（推荐）
+
+基础设施 + MinerU + qingxi + retrieval：
+
+```bash
+docker compose up -d --build
+curl http://127.0.0.1:8003/health      # qingxi（宿主机 8001 常被占用，映射 8003）
+curl http://127.0.0.1:8100/healthz     # retrieval
+curl http://127.0.0.1:8008/v1/health   # MinerU
+```
+
+首次构建会下载 Python 依赖和 MinerU 模型，耗时较长。Windows 上 Milvus 映射为 `18530`（系统保留了 19530）。对象存储用 SeaweedFS（MinIO 社区版已停发）。嵌入模型为本地 **BGE-M3**（挂载 `retrieval/model/models/BAAI--bge-m3/snapshots/master`），换模型后需在容器内执行 `python -m app.graphrag.rebuild_vectors`。
+
+## 快速启动（宿主机）
 
 ```bash
 # 1. 安装依赖

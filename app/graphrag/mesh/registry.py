@@ -5,13 +5,24 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from ..ids import normalize_name
 
+_NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
 
 def _round_tol(value: float, tol: float) -> str:
     return f"{round(float(value) / tol) * tol:.3f}"
+
+
+def _num(value) -> Optional[float]:
+    """取数值:1.2 / "1.2μs" / "1000Hz" -> 首个数;空串/无数字返回 None(LLM 属性为自由文本)。"""
+    if isinstance(value, (int, float)):
+        return float(value)
+    m = _NUM_RE.search(str(value or ""))
+    return float(m.group(0)) if m else None
 
 
 def _norm_freq(freq: str) -> str:
@@ -23,15 +34,16 @@ def fingerprint(properties: dict) -> Optional[str]:
     if not properties:
         return None
     parts: list[str] = []
-    freq = properties.get("freq_band") or properties.get("频率") or properties.get("value")
-    pw = properties.get("pulse_width") or properties.get("脉宽")
-    prf = properties.get("prf") or properties.get("重频")
+    freq = (properties.get("freq_band") or properties.get("频率")
+            or properties.get("频段") or properties.get("value"))
+    pw = _num(properties.get("pulse_width") or properties.get("脉宽"))
+    prf = _num(properties.get("prf") or properties.get("重频"))
     if freq:
         parts.append("f:" + _norm_freq(str(freq)))
     if pw is not None:
-        parts.append("pw:" + _round_tol(float(pw), 0.5))
+        parts.append("pw:" + _round_tol(pw, 0.5))
     if prf is not None:
-        parts.append("prf:" + _round_tol(float(prf), 100.0))
+        parts.append("prf:" + _round_tol(prf, 100.0))
     return "|".join(parts) if parts else None
 
 

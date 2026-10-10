@@ -1,25 +1,26 @@
 """GP-08 QRY-01:意图分流 + 在线查询编排(Plan §3.9,async 移植)。
 
-检索型走 A/B 双路召回;关系型在图扩展后追加绑定子块召回。
+检索型走 A/B 双路召回;关系型在图扩展后补召回扩展实体的绑定子块,三路统一重排截断。
 最终 generate_answer 带引用;命中经 trace_hook 计入 TRACE(§3.11 联动)。
+上下文有界:图扩展最多 expand_limit 个实体(按 hop_quotas 分配每跳名额)、
+每实体最多 facts_per_entity 条一跳事实、最多 path_facts 条多跳关系链、子块最多 rerank_topk 条。
 
 关系触发词不再 import 时从 yaml 读:由端点现查 extraction_dict(dict.load_relations)
 后经 relation_defs 传入,改字典即时生效。
 """
 from __future__ import annotations
 
-import asyncio
 from typing import Callable, Optional
 
 from ..config import get
 from ..embeddings import EmbeddingClient
 from ..llm import LLMClient
-from ..milvus_client import F_ENABLED, F_KG_ENTITY_IDS, AsyncMilvusClient
+from ..milvus_client import AsyncMilvusClient
 from ..neo4j_client import Neo4jClient
 from .answer import generate_answer
 from .expand import expand
 from .nl2query import nl2query
-from .recall import and_expr, dual_recall, kb_expr, match_entities
+from .recall import dual_recall, match_entities, recall_expanded
 from .rerank import rerank
 
 
@@ -45,15 +46,19 @@ def route(query: str, relation_defs: dict) -> str:
 
 
 async def collect_graph_facts(neo4j: Neo4jClient, matched_ids: list[str],
-                              id2name: dict) -> list[str]:
-    """把命中实体的一跳关系边整理成结构化事实文本(看图答)。
+                              id2name: dict, kb_id=None,
+                              expanded: Optional[list] = None) -> list[str]:
+    """把命中实体的关系整理成结构化事实文本(看图答)。
 
-    即便对端实体是孤儿(无 BINDS 子块内容),也能据边直接回答「X 有哪些 Y」。
-    方向:out = 命中实体指向对端;in = 对端指向命中实体。
+    一跳:命中实体直接相连的边,即便对端是孤儿(无 BINDS 子块)也能答「X 有哪些 Y」。
+    多跳:expanded 里经关系链到达的实体(带 path),写成整条链,如
+          「A --[隶属]--> B <--[装备于]-- C」,让 LLM 看到跨实体的推理路径。
+    方向:箭头始终指向关系边的真实方向。
     """
     facts: list[str] = []
+    per_entity = int(get("query.facts_per_entity", 15))
     for eid in matched_ids:
-        for r in await neo4j.entity_relations(eid):
+        for r in await neo4j.entity_relations(eid, limit=per_entity, kb_id=kb_id):
             head = id2name.get(eid, eid)
             tgt = r["target_name"]
             if r.get("target_type"):
@@ -62,7 +67,31 @@ async def collect_graph_facts(neo4j: Neo4jClient, matched_ids: list[str],
                 facts.append(f"{head} --[{r['rel_type']}]--> {tgt}")
             else:
                 facts.append(f"{tgt} --[{r['rel_type']}]--> {head}")
+    facts += path_facts(expanded or [], int(get("query.path_facts", 10)))
     return facts
+
+
+def path_facts(expanded: list, limit: int) -> list[str]:
+    """多跳关系链 -> 事实文本。只保留最长链:链 A→B→C 已包含 A→B,不重复输出前缀。"""
+    with_path = [e for e in expanded if e.get("path")]
+    with_path.sort(key=lambda e: -len(e["path"]))
+    covered: set = set()
+    chains: list[tuple[int, str]] = []
+    for e in with_path:
+        if e["name"] in covered:
+            continue
+        steps = e["path"]
+        text = steps[0]["from"]
+        for s in steps:
+            covered.add(s["to"])
+            text += (f" --[{s['rel_type']}]--> {s['to']}" if s["dir"] == "out"
+                     else f" <--[{s['rel_type']}]-- {s['to']}")
+        type_tag = f"（{e['entity_type']}）" if e.get("entity_type") else ""
+        chains.append((len(steps), f"{text}{type_tag}（{len(steps)}跳关系链）"))
+        if len(chains) >= limit:
+            break
+    chains.sort(key=lambda c: c[0])
+    return [t for _, t in chains]
 
 
 async def search(query: str, milvus: AsyncMilvusClient, neo4j: Neo4jClient,
@@ -81,25 +110,21 @@ async def search(query: str, milvus: AsyncMilvusClient, neo4j: Neo4jClient,
     matched_ids = match_entities(query, entities)
 
     rec = await dual_recall(query, milvus, embeddings, matched_ids, kb_id=kb_id)
-    hits = rerank(rec["a"], rec["b"], matched_ids=matched_ids)
 
-    # 关系型:图扩展、收集一跳关系事实(看图答)、追加绑定子块召回
+    # 关系型:图扩展、收集一跳关系事实(看图答)、补召回扩展实体的绑定子块。
+    # 补召回结果与 A/B 两路一起进 rerank 统一排序截断,不再在重排之后直接追加(防上下文膨胀)。
     expanded = []
     graph_facts: list[str] = []
+    extra_hits: list[dict] = []
     if intent == "graph" and matched_ids:
-        expanded = await expand(neo4j, matched_ids)
+        expanded = await expand(neo4j, matched_ids, kb_id=kb_id)
         id2name = {e["entity_id"]: e["name"] for e in entities}
-        graph_facts = await collect_graph_facts(neo4j, matched_ids, id2name)
-        extra_ids = [e["entity_id"] for e in expanded]
-        existing = {x.get("child_id") for x in hits}
-        vec = await asyncio.to_thread(embeddings.embed_one, query)
-        for eid in extra_ids:
-            expr = and_expr(f"{F_ENABLED} == true", kb_expr(kb_id),
-                            f"ARRAY_CONTAINS({F_KG_ENTITY_IDS}, '{eid}')")
-            for h in await milvus.search(vec, int(get("query.topk", 10)), expr=expr):
-                if h.get("child_id") not in existing:
-                    existing.add(h["child_id"])
-                    hits.append(h)
+        graph_facts = await collect_graph_facts(neo4j, matched_ids, id2name, kb_id=kb_id,
+                                                expanded=expanded)
+        extra_hits = await recall_expanded(query, milvus, embeddings,
+                                           [e["entity_id"] for e in expanded], kb_id=kb_id)
+
+    hits = rerank(rec["a"] + extra_hits, rec["b"], matched_ids=matched_ids)
 
     answer = await generate_answer(query, hits, llm, trace_hook, graph_facts=graph_facts)
     return {"intent": intent, "cond": cond, "answer": answer, "hits": hits,

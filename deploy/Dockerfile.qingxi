@@ -1,0 +1,28 @@
+FROM docker.m.daocloud.io/library/python:3.12-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=120
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ffmpeg libgl1 libglib2.0-0 gcc g++ libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY deploy/requirements.qingxi.txt /tmp/requirements.qingxi.txt
+
+RUN pip install -U pip -i https://pypi.tuna.tsinghua.edu.cn/simple \
+ && pip install torch --index-url https://download.pytorch.org/whl/cpu \
+ && pip install -r /tmp/requirements.qingxi.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+COPY app /app/app
+COPY common /app/common
+
+EXPOSE 8001
+
+HEALTHCHECK --interval=20s --timeout=5s --start-period=40s --retries=10 \
+  CMD curl -fsS http://127.0.0.1:8001/health || exit 1
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]

@@ -14,9 +14,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models import PendingExtraction
 from . import db
 from .config import load_few_shot
+from .coref import DocCoref
 from .ids import canonical_relation_id, normalize_name
 from .llm import LLMClient
 from .models import Entity, Relation, Support
+
+_PRIOR_SUBJECTS = 5   # 每节注入的前文主体上限(按出现章节数、首次出现顺序排序)
+
+
+def _section_context(p: dict, chapter_title: dict, prior: list) -> str:
+    """本节路径 + 前文主体,让模型把「该雷达」写成前文实体的全名。"""
+    chapter = str(p.get("chapter_no") or "")
+    parts = chapter.split(".")
+    path = [chapter_title.get(".".join(parts[:i]), "") for i in range(1, len(parts))]
+    path = [t for t in path + [p.get("title") or ""] if t]
+    lines = []
+    if path:
+        lines.append("本节路径：" + " > ".join(path))
+    if prior:
+        lines.append("前文主体：" + "、".join(f"{e.name}（{e.entity_type}）" for e in prior))
+        lines.append("本节用「该/此/上述 + 名称」指代前文主体时(如「该雷达」)，head/tail 写前文主体的全名；"
+                     "只抽本节文字明确表述的关系，不要在前文主体之间编造关系。")
+    return "\n".join(lines)
 
 
 def _relation_types(relation_defs: dict) -> dict[str, str]:
@@ -89,36 +108,82 @@ async def extract(session: AsyncSession, entities: list[Entity], llm: Optional[L
     relations: dict[str, Relation] = {}
     supports: list[Support] = []
 
-    for p in parents:
+    coref = DocCoref(entities, parents)
+    id_to_entity = {e.entity_id: e for e in entities}
+    norm_texts = [normalize_name(p.get("content", "")) for p in parents]
+    section_count = {e.entity_id: sum(normalize_name(e.name) in t for t in norm_texts) for e in entities}
+    chapter_title = {str(p.get("chapter_no") or ""): p.get("title") or "" for p in parents}
+
+    for pos, p in enumerate(parents):
         # 该父块覆盖到的实体(按其归一化名称出现在归一化正文中)。
         # 实体名已被 normalize_name 小写化(如 AN/TPQ-50 -> an/tpq-50),正文仍是原始大小写,
         # 若直接 e.name in content 做大小写敏感匹配会全部落空、关系抽取被跳过(LLM 从未调用)。
         # 这里把正文也归一化后再做子串匹配,保证英文大写实体/含空格中文名能命中原文。
-        norm_content = normalize_name(p.get("content", ""))
+        norm_content = norm_texts[pos]
         parent_entities = [e for e in entities if normalize_name(e.name) in norm_content]
         if not parent_entities:
             continue
+        local_ids = {e.entity_id for e in parent_entities}
+        # 前文主体:首次出现在前面章节、本节没写全名的实体,供「该雷达」这类指代回指(只取前几个)
+        prior = sorted((e for e in entities if e.entity_id not in local_ids
+                        and coref.first_pos.get(e.entity_id, 10 ** 9) < pos),
+                       key=lambda e: (-section_count.get(e.entity_id, 0), coref.first_pos[e.entity_id]))
+        prior = prior[:_PRIOR_SUBJECTS]
         raw_list = await asyncio.to_thread(
             llm.extract_relations, p.get("content", ""),
-            [e.to_dict() for e in parent_entities],
+            [e.to_dict() for e in parent_entities + prior],
             relation_defs["relation_types"], fewshot,
+            context=_section_context(p, chapter_title, prior),
         )
         for raw in raw_list:
-            # mock/openai 返回实体名 -> 映射为 id。实体名已 normalize_name(小写+去空白),
-            # 而小模型常回原大小写(如 AN/TPQ-50 vs 实体名 an/tpq-50),这里先归一化再查表。
-            raw["head"] = name_to_id.get(normalize_name(str(raw.get("head", ""))), raw.get("head"))
-            raw["tail"] = name_to_id.get(normalize_name(str(raw.get("tail", ""))), raw.get("tail"))
-            # 中文 rel_type -> en 归一化(小模型偶发输出中文而非英文标识)
+            # 中文 rel_type -> en 归一化(小模型偶发输出中文而非英文标识);放在端点回指前,回指要用它的头尾类型
             rt = raw.get("rel_type")
             if isinstance(rt, str) and rt.strip() not in rel_types:
                 mapped = rel_label_to_en.get(rt.strip())
                 if mapped:
                     raw["rel_type"] = mapped
+            head_types, tail_types = rel_domains.get(raw.get("rel_type"), (set(), set()))
+            # 端点:实体名 -> id。实体名已 normalize_name(小写+去空白),小模型常回原大小写,先归一化再查表;
+            # 查不到的(如「该雷达」「雷达」)按文档内指代消解回指前文实体
+            corefs: list[str] = []
+            unresolved: list[str] = []
+            for side, allowed in (("head", head_types), ("tail", tail_types)):
+                name = str(raw.get(side, ""))
+                eid = name_to_id.get(normalize_name(name))
+                if eid is None and name:
+                    status, res = coref.resolve(name, pos, allowed or None)
+                    if status == "ok":
+                        eid = res.entity_id
+                        corefs.append(f"{name}→{res.name}")
+                    elif status == "ambiguous":
+                        unresolved.append(f"指代未消解:「{name}」有多个前文候选("
+                                          + "、".join(c.name for c in res) + ")")
+                if eid is not None:
+                    raw[side] = eid
+            # 本节没写全名的前文实体当端点,必须能在本节找到它的中心词(如本节「该雷达」→对空搜索雷达),
+            # 否则就是模型凭前文主体编出来的边
+            for side in ("head", "tail"):
+                eid = raw.get(side)
+                ent = id_to_entity.get(eid)
+                if ent is None or eid in local_ids:
+                    continue
+                mention = coref.head_in_text(ent, pos)
+                status, res = (coref.resolve(mention, pos) if mention else ("none", None))
+                if status == "ok" and res.entity_id == eid:
+                    note = f"{mention}→{ent.name}"
+                    if not any(n.endswith(f"→{ent.name}") for n in corefs):
+                        corefs.append(note)
+                else:
+                    unresolved.append(f"「{ent.name}」不在本节,且本节没有能唯一回指它的提及")
+            if corefs:
+                raw["evidence"] = f"{raw.get('evidence', '')}(指代:{'；'.join(corefs)})"
             # 小模型偶发漏 confidence 字段,默认中档置信,不因此丢关系
             if isinstance(raw, dict) and raw.get("confidence") is None:
                 raw["confidence"] = 0.8
-            errors = _validate(raw, set(name_to_id.values()), rel_types,
-                               id_to_type, rel_domains)
+            errors = unresolved + _validate(raw, set(name_to_id.values()), rel_types,
+                                            id_to_type, rel_domains)
+            if raw.get("head") and raw.get("head") == raw.get("tail"):
+                errors.append("head 与 tail 是同一实体")
             conf = raw.get("confidence", 0.0) if isinstance(raw, dict) else 0.0
             thresh = min_conf.get(raw.get("rel_type"), 0.75)
             if errors or conf < thresh:

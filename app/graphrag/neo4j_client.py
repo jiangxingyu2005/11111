@@ -178,7 +178,8 @@ class Neo4jClient:
         if clauses:
             cypher += " WHERE " + " AND ".join(clauses)
         cypher += (" RETURN e.entity_id AS entity_id, e.name AS name, "
-                   "e.entity_type AS entity_type, e.aliases AS aliases")
+                   "e.entity_type AS entity_type, e.aliases AS aliases, "
+                   "e.properties AS properties")
         return await self.run(cypher, **params)
 
     async def entity_ids_of_parent(self, parent_id: str) -> list[str]:
@@ -420,37 +421,184 @@ class Neo4jClient:
             f"(b:Entity {{entity_id: $tail}}) DELETE r",
             head=head_entity_id, tail=tail_entity_id)
 
-    async def entity_relations(self, entity_id: str) -> list[dict]:
+    @staticmethod
+    def _edge_in_kb(r: str, x: str, y: str) -> str:
+        """关系边是否属于 $kb_id:有来源分段的看来源分段所属库;
+        无来源的(派生边/手工边)要求两端实体都在该库的分段里出现过。"""
+        return (f"CASE WHEN {r}.source_parent_id IS NOT NULL "
+                f"THEN EXISTS {{ MATCH (src:Segment {{parent_id: {r}.source_parent_id}}) WHERE src.kb_id = $kb_id }} "
+                f"ELSE EXISTS {{ MATCH ({x})-[:BINDS]->(s1:Segment) WHERE s1.kb_id = $kb_id }} "
+                f"AND EXISTS {{ MATCH ({y})-[:BINDS]->(s2:Segment) WHERE s2.kb_id = $kb_id }} END")
+
+    async def entity_relations(self, entity_id: str, limit: Optional[int] = None,
+                               kb_id=None) -> list[dict]:
         """实体的一跳关系边(含方向/类型/对端实体名+类型),BINDS 除外。
 
         供关系型查询「看图答」:把命中的实体在图中直接相连的边作为事实喂给 LLM,
         即便对端实体是孤儿(无 BINDS 内容)也能给出「X 有哪些 Y」的结构化答案。
         """
+        # limit:枢纽实体(如某国别组织)可能连成百上千条边,不设上限会把提示词撑爆。
+        # 抽取边优先于派生边(derived 为 false 排前),同类按置信度降序,两个方向各取 limit 再合并截断。
+        tail = (" RETURN '{dir}' AS dir, type(r) AS rel_type, b.entity_id AS target_id, "
+                "b.name AS target_name, b.entity_type AS target_type, "
+                "coalesce(r.derived, false) AS derived, coalesce(r.confidence, 0.0) AS confidence "
+                "ORDER BY derived, confidence DESC")
+        if limit is not None:
+            tail += " LIMIT $limit"
+        # kb_id:实体全局共享,同一实体在别的库里的关系边不能作为本库的事实
+        kb = str(kb_id) if kb_id else None
+        scope = f" AND {self._edge_in_kb('r', 'a', 'b')}" if kb else ""
         out = await self.run(
-            "MATCH (a:Entity {entity_id: $id})-[r]->(b:Entity) WHERE type(r) <> 'BINDS' "
-            "RETURN 'out' AS dir, type(r) AS rel_type, b.entity_id AS target_id, "
-            "b.name AS target_name, b.entity_type AS target_type",
-            id=entity_id)
+            "MATCH (a:Entity {entity_id: $id})-[r]->(b:Entity) WHERE type(r) <> 'BINDS'" + scope
+            + tail.format(dir="out"), id=entity_id, limit=limit, kb_id=kb)
         inn = await self.run(
-            "MATCH (b:Entity)-[r]->(a:Entity {entity_id: $id}) WHERE type(r) <> 'BINDS' "
-            "RETURN 'in' AS dir, type(r) AS rel_type, b.entity_id AS target_id, "
-            "b.name AS target_name, b.entity_type AS target_type",
-            id=entity_id)
-        return out + inn
+            "MATCH (b:Entity)-[r]->(a:Entity {entity_id: $id}) WHERE type(r) <> 'BINDS'" + scope
+            + tail.format(dir="in"), id=entity_id, limit=limit, kb_id=kb)
+        rows = sorted(out + inn, key=lambda r: (bool(r.get("derived")), -float(r.get("confidence") or 0.0)))
+        return rows[:limit] if limit is not None else rows
 
     # ---- 图扩展 ----
-    async def expand(self, entity_ids: list, depth: int) -> list[dict]:
+    _EXPAND_FRONTIER_CAP = 200   # 每跳最多带多少个节点进下一跳(防枢纽实体/分段把边界撑爆)
+    _COOCCUR_MAX_HOPS = 2        # 同段共现只用于前 2 跳;3 跳起只走抽取关系边
+
+    async def _rel_step(self, frontier: list, visited: list, kb) -> list[dict]:
+        """一跳关系边扩展(实体-实体,不含 BINDS、不含派生边)。
+
+        每个新到达节点只留一条来路(置信度最高),供回溯关系链;按置信度取前 cap 个。
+        """
+        scope = f" AND {self._edge_in_kb('r', 'x', 'y')}" if kb else ""
+        return await self.run(
+            "MATCH (x:Entity)-[r]-(y:Entity) WHERE elementId(x) IN $frontier "
+            "AND type(r) <> 'BINDS' AND NOT coalesce(r.derived, false) "
+            "AND NOT elementId(y) IN $visited" + scope + " "
+            "WITH y, x, r, coalesce(r.confidence, 0.0) AS conf ORDER BY conf DESC "
+            "WITH y, collect({prev: elementId(x), rel: type(r), "
+            "dir: CASE WHEN startNode(r) = x THEN 'out' ELSE 'in' END, conf: conf})[0] AS via "
+            "RETURN elementId(y) AS nid, y.entity_id AS entity_id, y.name AS name, "
+            "y.entity_type AS entity_type, via ORDER BY via.conf DESC, nid LIMIT $cap",
+            frontier=frontier, visited=visited, cap=self._EXPAND_FRONTIER_CAP, kb_id=kb)
+
+    async def _cooccur_step(self, frontier: list, visited: list, kb) -> list[dict]:
+        """一跳同段共现扩展:与边界实体出现在同一(本库)分段里的实体,按共享分段数排序。"""
+        scope = " AND s.kb_id = $kb_id" if kb else ""
+        return await self.run(
+            "MATCH (x:Entity)-[:BINDS]->(s:Segment)<-[:BINDS]-(y:Entity) "
+            "WHERE elementId(x) IN $frontier AND NOT elementId(y) IN $visited" + scope + " "
+            "WITH y, count(DISTINCT s) AS shared "
+            "RETURN elementId(y) AS nid, y.entity_id AS entity_id, y.name AS name, "
+            "y.entity_type AS entity_type, shared ORDER BY shared DESC, nid LIMIT $cap",
+            frontier=frontier, visited=visited, cap=self._EXPAND_FRONTIER_CAP, kb_id=kb)
+
+    async def _bfs(self, seeds: list, depth: int, kb, cooccur: bool) -> dict:
+        """逐跳 BFS,返回 {nid: {entity_id, name, entity_type, hops, via, shared}}。
+
+        cooccur=False:只走关系边(via 记录来路,可回溯成关系链);
+        cooccur=True :每跳 关系边 + 同段共现 合并(同一节点两种都到达时以关系边为准)。
+        """
+        found: dict = {}
+        frontier = list(seeds)
+        visited = set(seeds)
+        for hop in range(1, depth + 1):
+            if not frontier:
+                break
+            rows = {r["nid"]: dict(r, shared=0) for r in await self._rel_step(frontier, list(visited), kb)}
+            if cooccur:
+                for r in await self._cooccur_step(frontier, list(visited), kb):
+                    if r["nid"] not in rows:
+                        rows[r["nid"]] = dict(r, via=None)
+                    else:
+                        rows[r["nid"]]["shared"] = r["shared"]
+            ranked = sorted(rows.values(), key=lambda r: (r.get("via") is None,
+                                                          -float((r.get("via") or {}).get("conf") or 0.0),
+                                                          -int(r.get("shared") or 0), r["nid"]))
+            ranked = ranked[:self._EXPAND_FRONTIER_CAP]
+            for r in ranked:
+                found[r["nid"]] = {"entity_id": r["entity_id"], "name": r["name"],
+                                   "entity_type": r["entity_type"], "hops": hop,
+                                   "via": r.get("via"), "shared": int(r.get("shared") or 0)}
+            frontier = [r["nid"] for r in ranked]
+            visited.update(frontier)
+        return found
+
+    @staticmethod
+    def _rel_path(nid: str, rel: dict, seed_names: dict) -> list[dict]:
+        """沿关系 BFS 的来路回溯到种子,返回 [{from, rel_type, dir, to}, ...](种子 → 该实体)。"""
+        steps = []
+        cur = nid
+        while cur in rel:
+            via = rel[cur]["via"]
+            prev = via["prev"]
+            prev_name = rel[prev]["name"] if prev in rel else seed_names.get(prev, prev)
+            steps.append({"from": prev_name, "rel_type": via["rel"], "dir": via["dir"],
+                          "to": rel[cur]["name"]})
+            cur = prev
+        return list(reversed(steps))
+
+    async def expand(self, entity_ids: list, depth: int, limit: Optional[int] = None,
+                     kb_id=None, hop_quotas: Optional[list] = None) -> list[dict]:
+        """从种子实体做 1..depth 跳扩展,返回关联实体(不含种子本身)。
+
+        跳数按实体计:A 与 B 之间有一条关系边,或出现在同一分段(同段共现),都算 1 跳。
+        两遍 BFS(逐跳展开去重节点,代价随节点数增长,不随路径数指数增长):
+          - 关系遍:只走抽取关系边,最多 depth 跳,记录来路,可回溯成关系链;
+          - 共现遍:关系边 + 同段共现,最多 _COOCCUR_MAX_HOPS(2)跳。
+        合并取最短跳数,所以第 3、4 跳的实体一定是经完整关系链到达的。
+        hop_quotas:每跳名额(如 [12, 10, 4, 4]),防止近处实体占满 limit;某跳不足的名额
+        让给其余候选。不传 = 近的优先。经关系链(≥2 跳)到达的实体附带 path,供生成多跳事实。
+        派生边(同频段/同时段/同区域)不参与遍历。kb_id:只走本库分段与本库关系边;不传 = 全库。
+        """
         if not entity_ids:
             return []
-        # Neo4j 5.26 可变长度边界不接受参数,须是字面量;depth 为受控整数(配置项)
+        kb = str(kb_id) if kb_id else None
         depth = int(depth)
-        return await self.run(
-            f"MATCH p=(a:Entity)-[*1..{depth}]-(b:Entity) "
-            "WHERE a.entity_id IN $ids "
-            "RETURN b.entity_id AS entity_id, b.name AS name, "
-            "b.entity_type AS entity_type, min(length(p)) AS hops",
-            ids=list(entity_ids),
-        )
+        seed_rows = await self.run(
+            "MATCH (a:Entity) WHERE a.entity_id IN $ids RETURN elementId(a) AS nid, a.name AS name",
+            ids=list(entity_ids))
+        seeds = [r["nid"] for r in seed_rows]
+        seed_names = {r["nid"]: r["name"] for r in seed_rows}
+
+        rel = await self._bfs(seeds, depth, kb, cooccur=False)
+        near = await self._bfs(seeds, min(depth, self._COOCCUR_MAX_HOPS), kb, cooccur=True)
+
+        items: list[dict] = []
+        for nid in set(rel) | set(near):
+            base = rel.get(nid) or near[nid]
+            hops = min(x["hops"] for x in (rel.get(nid), near.get(nid)) if x)
+            item = {"entity_id": base["entity_id"], "name": base["name"],
+                    "entity_type": base["entity_type"], "hops": hops}
+            if nid in rel and rel[nid]["hops"] >= 2:
+                item["path"] = self._rel_path(nid, rel, seed_names)
+            item["_rank"] = (0 if nid in rel else 1,
+                             rel[nid]["hops"] if nid in rel else 99,
+                             -(near[nid]["shared"] if nid in near else 0), base["entity_id"])
+            items.append(item)
+
+        if limit is None:
+            chosen = items
+        elif hop_quotas:
+            quotas = [int(q) for q in hop_quotas[:depth]]
+            total = sum(quotas)
+            if total > limit:   # 名额之和超过上限:按比例压缩,每跳至少 1 个
+                quotas = [max(1, q * limit // total) for q in quotas]
+            by_hop: dict = {}
+            for it in items:
+                by_hop.setdefault(it["hops"], []).append(it)
+            chosen, rest = [], []
+            for h, group in by_hop.items():
+                group.sort(key=lambda it: it["_rank"])
+                q = quotas[h - 1] if h - 1 < len(quotas) else 0
+                chosen += group[:q]
+                rest += group[q:]
+            rest.sort(key=lambda it: (it["hops"], it["_rank"]))
+            chosen += rest[:max(0, limit - len(chosen))]
+            chosen = chosen[:limit]
+        else:
+            chosen = sorted(items, key=lambda it: (it["hops"], it["_rank"]))[:limit]
+
+        for it in chosen:
+            it.pop("_rank", None)
+        chosen.sort(key=lambda e: (e["hops"], e["entity_id"]))
+        return chosen
 
 
 def get_neo4j() -> Neo4jClient:

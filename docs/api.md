@@ -132,17 +132,24 @@ H5 → SNR 清洗 → IQ 补全 → 信号处理 → 26 特征中文描述入库
 | `enabled` | bool | 是否启用 |
 | `created_at` / `updated_at` | datetime | 时间戳 |
 
-> 服务启动时自动写入**种子数据**:10 实体(原始信号/信号样本/信号簇/辐射源/平台/组织/工作状态/目标/事件/情报产品)
-> + 11 关系(来源 `SOURCE_OF` / 组成 `COMPOSED_OF` / 归并为 `MERGED_INTO` / 型号匹配 `MODEL_MATCH` /
+> 服务启动时自动同步**种子数据**(定义见 `app/graphrag/seed.py`,按需求文档(5)(7)(10)固定):
+> 11 实体(原始信号/信号样本/信号簇/辐射源/平台/组织/工作状态/目标/事件/情报产品/武器)
+> + 14 关系(来源 `SOURCE_OF` / 组成 `COMPOSED_OF` / 归并为 `MERGED_INTO` / 型号匹配 `MODEL_MATCH` /
 > 装备于 `EQUIPPED_ON` / 隶属 `BELONGS_TO` / 具有状态 `HAS_STATE` / 关联目标 `RELATED_TARGET` /
-> 平台候选 `PLATFORM_CANDIDATE` / 产生 `PRODUCES` / 写入 `WRITTEN_INTO`)。
+> 平台候选 `PLATFORM_CANDIDATE` / 产生 `PRODUCES` / 写入 `WRITTEN_INTO` /
+> 支援 `SUPPORTS` / 交联 `CO_LINK` / 涉及 `INVOLVES`)。
 >
 > **受控本体方向约束**:每条关系带 `head_types`/`tail_types` 约束两端实体类型(domain/range),
 > 抽取校验 `head 类型 ∈ head_types`、`tail 类型 ∈ tail_types`,不满足 → 进 `pending_extraction`,
-> 防止「辐射源—装备于→辐射源」这类语义荒谬的边。实体清单无「装备/型号」,`装备于`/`型号匹配` 两端用辐射源(=发射装备)与平台承载。
+> 防止「辐射源—装备于→辐射源」这类语义荒谬的边。
 >
-> 另有 3 个**派生关系类型**(`SAME_BAND`/`CO_TIME`/`CO_LOCATE`)不入字典:由 mesh 图增强(§10)
-> 按元数据自动织入,带 `derived=true` 标记,与抽取边区分、可整体重算。
+> **参数是属性不是实体**(需求(10)):频率/频段/脉宽/重频/带宽/调制方式写进所属实体的 `properties`,
+> 名字只是参数值的实体(如 `850MHz`、`QPSK`)抽取时拒收进 `pending_extraction`。
+> 辐射源/平台/武器带 `粒度` 属性(`型号` / `个体`),型号节点即需求(5)的「辐射源型号节点」。
+>
+> 另有 3 个**派生关系**(`category=derived`:同频段 `SAME_BAND` / 同时段 `CO_TIME` / 同区域 `CO_LOCATE`):
+> 登记进字典便于图例与溯源,但**不进 LLM 抽取**;由 mesh 图增强(§10)按实体属性计算(同频段按频率区间重合),
+> 带 `derived=true` 标记、证据为「规则派生」,与抽取边区分、可整体重算。
 
 ### 2.2 增删改查
 
@@ -702,6 +709,22 @@ curl -X POST http://192.168.31.15:8001/graph/resolve
 ### 12.3 查询参数(`GRAPHRAG_QUERY_TOPK/_RERANK_TOPK/_EXPAND_DEPTH/_ENTITY_BOOST_WEIGHT`)
 
 - 真实查询集 + 标注答案,扫参找最佳命中率。
+
+图扩展相关(`intent=graph` 时生效):
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `GRAPHRAG_QUERY_EXPAND_DEPTH` | 2 | 最大跳数。**跳数按实体计**:两个实体之间有一条关系边,或出现在同一分段(同段共现),都算 1 跳 |
+| `GRAPHRAG_QUERY_EXPAND_LIMIT` | 30 | 扩展实体总数上限 |
+| `GRAPHRAG_QUERY_HOP_QUOTAS` | `12,10,4,4` | 第 1..4 跳的名额,防止近处实体占满上限;某跳不足的名额让给其余候选 |
+| `GRAPHRAG_QUERY_FACTS_PER_ENTITY` | 15 | 每个命中实体最多取的一跳关系事实 |
+| `GRAPHRAG_QUERY_PATH_FACTS` | 10 | 多跳关系链事实最多条数 |
+
+遍历规则:同段共现只用于前 2 跳,第 3 跳起只走抽取关系边,所以 3、4 跳的实体一定经完整关系链到达;
+派生边(同频段/同时段/同区域)不参与遍历;传 `kb_id` 时只走本库的分段与关系边。
+`expanded_entities` 每项含 `entity_id/name/entity_type/hops`,经关系链(≥2 跳)到达的另带 `path`
+(`[{from, rel_type, dir, to}]`),同时写进 `graph_facts`,如
+`A --[EQUIPPED_ON]--> B --[BELONGS_TO]--> C（2跳关系链）`。
 
 ### 12.4 字典重定义(`/graph/dict`)
 

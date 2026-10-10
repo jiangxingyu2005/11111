@@ -8,7 +8,7 @@
 |---|---|---|
 | `name` | string | 名称（实体/关系中文名） |
 | `en` | string? | 英文名（关系用，如 `BELONGS_TO`） |
-| `category` | string | **`entity`（节点）/ `relation`（关系）** |
+| `category` | string | **`entity`（节点）/ `relation`（抽取关系）/ `derived`（规则派生关系，不参与 LLM 抽取）** |
 | `description` | string | 描述 |
 | `json_schema` | object? | 该类型抽取时的属性结构（function-calling **硬约束**，见下） |
 | `trigger_words` | string[]? | 关系触发词 |
@@ -107,7 +107,7 @@
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `category` | string | 否 | 按类别过滤：`entity` / `relation` |
+| `category` | string | 否 | 按类别过滤：`entity` / `relation` / `derived` |
 
 **请求示例**：`GET http://192.168.31.15:8001/graph/dict?category=entity`
 

@@ -28,14 +28,15 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/graph", tags=["graph"])
 
-_ALLOWED_CATEGORY = {"entity", "relation"}
+# derived = 规则派生关系(同频段/同时段/同区域),登记用于图例与溯源,不参与 LLM 抽取
+_ALLOWED_CATEGORY = {"entity", "relation", "derived"}
 
 
 def _validate_category(category: str) -> None:
     if category not in _ALLOWED_CATEGORY:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"category 必须是 entity 或 relation,收到: {category!r}",
+            detail=f"category 必须是 entity / relation / derived,收到: {category!r}",
         )
 
 
@@ -199,10 +200,10 @@ async def graph_query_stream(payload: GraphQueryRequest, db: AsyncSession = Depe
                 expanded = []
                 graph_facts = []
                 if intent == "graph" and matched_ids:
-                    expanded = await expand(neo4j, matched_ids)
+                    expanded = await expand(neo4j, matched_ids, kb_id=payload.kb_id)
                     id2name = {e["entity_id"]: e["name"] for e in entities}
                     graph_facts = await query_router.collect_graph_facts(
-                        neo4j, matched_ids, id2name)
+                        neo4j, matched_ids, id2name, kb_id=payload.kb_id, expanded=expanded)
                     yield _sse("progress", {"step": "graph_expand",
                                             "expanded": len(expanded),
                                             "facts": graph_facts})

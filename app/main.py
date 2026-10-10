@@ -1,10 +1,14 @@
 import logging
+
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
 from .api import documents, graph, iq, knowledge_bases, mesh, neo4j, parse, rules, seg
-from .config import settings
+from .config import settings, start_nacos_watcher
 from .utils.database import SessionLocal, init_db
 
 logger = logging.getLogger(__name__)
@@ -63,6 +67,8 @@ async def lifespan(app: FastAPI):
     await init_db()
     await _bootstrap_graphrag()
     await _bootstrap_iq()
+    # Nacos 配置中心变更监听（enabled 才起；daemon 线程，随进程退出自动回收）
+    start_nacos_watcher()
     yield
 
 

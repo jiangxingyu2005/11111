@@ -13,7 +13,11 @@ from ..neo4j_client import Neo4jClient
 
 
 async def expand(neo4j: Neo4jClient, entity_ids: list,
-                 depth: Optional[int] = None) -> list[dict]:
-    """图扩展。返回关联实体(含 hops)。"""
+                 depth: Optional[int] = None, limit: Optional[int] = None,
+                 kb_id=None) -> list[dict]:
+    """图扩展。返回关联实体(含 hops;经关系链到达的带 path),最多 expand_limit 个,
+    按 hop_quotas 分配每跳名额;传 kb_id 只在该库内扩展。"""
     depth = depth or int(get("query.expand_depth", 2))
-    return await neo4j.expand(entity_ids, depth)
+    limit = limit or int(get("query.expand_limit", 30))
+    quotas = get("query.hop_quotas", None) or None
+    return await neo4j.expand(entity_ids, depth, limit, kb_id=kb_id, hop_quotas=quotas)

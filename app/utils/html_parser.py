@@ -32,7 +32,7 @@ def _decode(content: bytes) -> str:
 
 def parse_html_to_markdown(content: bytes) -> str:
     """HTML 字节 -> markdown 文本(去掉噪音标签,保留结构)。"""
-    soup = BeautifulSoup(_decode(content), "lxml")
+    soup = BeautifulSoup(_decode(content), "html.parser")
 
     # 去掉 <head>(title/meta/style 等)与配置的噪音标签
     for node in soup.find_all(["head"]):

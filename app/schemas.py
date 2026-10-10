@@ -125,10 +125,10 @@ class DocumentRead(BaseModel):
 
 
 class ExtractionDictCreate(BaseModel):
-    """新建抽取字典条目(category=entity 节点 / relation 关系)。"""
+    """新建抽取字典条目(category=entity 节点 / relation 关系 / derived 派生关系)。"""
     name: str
     en: Optional[str] = None
-    category: str              # entity / relation
+    category: str              # entity / relation / derived
     description: str = ""
     json_schema: Optional[dict] = None
     trigger_words: Optional[list[str]] = None

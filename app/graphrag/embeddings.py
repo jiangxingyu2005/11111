@@ -84,11 +84,15 @@ _bge_models: dict[str, object] = {}
 
 
 def _local_bge_path(model_name: str) -> str:
-    """本地已缓存模型时返回其 snapshot 路径,否则回退原 repo id。
+    """本地目录或已缓存 snapshot 优先,避免 FlagEmbedding 访问 HuggingFace。
 
-    FlagEmbedding 1.4.x 加载时会访问 hub 查 chat template(网络请求),离线环境会超时;
-    本地缓存命中时直接给本地路径,彻底绕开网络。未缓存则回退 repo id 走在线下载。
+    配置写成绝对/相对目录(含 config.json)时直接用;否则尝试 hub 本地缓存;
+    都没有才回退 repo id(可能触发下载)。
     """
+    from pathlib import Path
+    p = Path(model_name)
+    if p.is_dir() and (p / "config.json").exists():
+        return str(p.resolve())
     try:
         from huggingface_hub import snapshot_download
         return snapshot_download(repo_id=model_name, local_files_only=True)

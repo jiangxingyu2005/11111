@@ -69,6 +69,11 @@ def build_settings() -> dict:
             "rerank_topk": settings.graphrag_query_rerank_topk,
             "expand_depth": settings.graphrag_query_expand_depth,
             "entity_boost_weight": settings.graphrag_query_entity_boost_weight,
+            "expand_limit": settings.graphrag_query_expand_limit,
+            "facts_per_entity": settings.graphrag_query_facts_per_entity,
+            "hop_quotas": [int(x) for x in str(settings.graphrag_query_hop_quotas).split(",")
+                           if x.strip().isdigit()],
+            "path_facts": settings.graphrag_query_path_facts,
         },
         "kafka": {
             "bootstrap_servers": settings.kafka_bootstrap_servers,

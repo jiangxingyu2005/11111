@@ -16,7 +16,7 @@ from .api.eval import router as eval_router
 from .api.graph import router as graph_router
 from .api.retrieval import router as retrieval_router
 from .api.session import router as session_router
-from .config import get_settings
+from .config import get_settings, start_nacos_watcher
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -150,6 +150,9 @@ def _startup() -> None:
 
     # 保活心跳：防本地 CPU 部署空置后模型/集合被卸载导致首查返空（每 3min 轻量 ping）
     _keepalive_loop(s)
+
+    # Nacos 配置中心变更监听（enabled 才起；daemon 线程，随进程退出自动回收）
+    start_nacos_watcher()
 
 
 @app.get("/healthz")

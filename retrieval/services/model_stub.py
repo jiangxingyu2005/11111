@@ -37,6 +37,7 @@ from pydantic import BaseModel
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "services"))
+sys.path.insert(0, str(ROOT.parent))  # 仓库根（common/ 所在）
 
 from providers import (  # noqa: E402
     BACKEND_FALLBACK, EmbedProvider, EndpointCfg, LLMProvider, RerankProvider,
@@ -49,6 +50,66 @@ log = logging.getLogger("model_stub")
 app = FastAPI(title="model-service", version="2.0.0")
 
 
+# ─────────────────── Nacos bootstrap（bootstrap-only，不热更新）──────────────────
+# 模型身份/端点变更本就需重预热，restart 代价低；本阶段只在启动时从 Nacos 拉一次
+# retrieval.yaml（及可选 retrieval.env），不监听。NACOS_ENABLED=false 时等同旧行为。
+_NACOS_YAML_CONTENT: str | None = None
+
+
+def _read_retrieval_yaml() -> dict:
+    """统一读 config/retrieval.yaml：有 Nacos 内容用 Nacos，否则回退本地文件。"""
+    import yaml
+    if _NACOS_YAML_CONTENT is not None:
+        return yaml.safe_load(_NACOS_YAML_CONTENT) or {}
+    with (ROOT / "config" / "retrieval.yaml").open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def _read_bootstrap_env() -> dict[str, str]:
+    """读 retrieval/.env 里的 NACOS_* bootstrap 键（本进程专用，最小 dotenv 解析）。"""
+    out: dict[str, str] = {}
+    p = ROOT / ".env"
+    if not p.exists():
+        return out
+    for raw in p.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        if k.startswith("NACOS_"):
+            out[k] = v.strip()
+    return out
+
+
+def _bootstrap_nacos() -> None:
+    global _NACOS_YAML_CONTENT
+    b = _read_bootstrap_env()
+    if b.get("NACOS_ENABLED", "").strip().lower() not in ("1", "true", "yes", "on"):
+        return
+    from common.nacos_client import NacosConfigClient, parse_properties
+    client = NacosConfigClient(
+        b.get("NACOS_SERVER_ADDR", "http://127.0.0.1:8848"),
+        namespace=b.get("NACOS_NAMESPACE", ""),
+        group=b.get("NACOS_GROUP", "DEFAULT_GROUP"),
+        username=b.get("NACOS_USERNAME", ""),
+        password=b.get("NACOS_PASSWORD", ""),
+    )
+    try:
+        _NACOS_YAML_CONTENT = client.get_config("retrieval.yaml")
+        log.info("model_stub loaded retrieval.yaml from Nacos")
+    except Exception as e:
+        log.warning("nacos retrieval.yaml load failed（回退本地文件）: %s", e)
+    try:
+        os.environ.update(parse_properties(client.get_config("retrieval.env")))
+        log.info("model_stub loaded retrieval.env from Nacos")
+    except Exception as e:
+        log.warning("nacos retrieval.env load failed（回退本地）: %s", e)
+
+
+_bootstrap_nacos()
+
+
 # ────────────────────────── 后端解析 ──────────────────────────
 def _resolve_backend(env_key: str, kind: str, default: str) -> tuple[str, str]:
     """env > yaml；返回 (值, 来源)。来源要能自省，否则排查时不知道配置到底从哪来。"""
@@ -56,9 +117,7 @@ def _resolve_backend(env_key: str, kind: str, default: str) -> tuple[str, str]:
     if v:
         return v, "env"
     try:
-        import yaml
-        with (ROOT / "config" / "retrieval.yaml").open("r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
+        cfg = _read_retrieval_yaml()
         b = ((cfg.get("models") or {}).get(kind) or {}).get("backend")
         if b:
             return b, "yaml"
@@ -78,9 +137,7 @@ _cfg_cache: dict[str, tuple[str, EndpointCfg]] = {}
 
 def _providers() -> tuple[EmbedProvider, RerankProvider, LLMProvider]:
     """按当前配置构造三个 Provider（配置可被 POST /v1/probe 临时改写后重建）。"""
-    import yaml
-    with (ROOT / "config" / "retrieval.yaml").open("r", encoding="utf-8") as f:
-        y = yaml.safe_load(f) or {}
+    y = _read_retrieval_yaml()
     m = y.get("models") or {}
     expect_dim = int((m.get("embed") or {}).get("dim", 1024))
 

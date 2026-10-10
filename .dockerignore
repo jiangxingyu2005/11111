@@ -1,6 +1,8 @@
 # —— 模型权重：走 models/ 挂载，不进镜像 ——
 model/
 retrieval/model/
+.venv/
+.tools/
 
 # —— 运行时数据 / 上传 / 输出 / 日志 ——
 uploads/

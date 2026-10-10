@@ -1,4 +1,16 @@
+import logging
+import os
+import sys
+import threading
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+log = logging.getLogger("qingxi.config")
+
+_ROOT = Path(__file__).resolve().parent.parent  # 仓库根（common/ 所在）
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 
 class Settings(BaseSettings):
@@ -148,6 +160,10 @@ class Settings(BaseSettings):
     graphrag_query_rerank_topk: int = 5
     graphrag_query_expand_depth: int = 2
     graphrag_query_entity_boost_weight: float = 0.15
+    graphrag_query_expand_limit: int = 30          # 图扩展最多返回的实体数(防枢纽节点扩爆)
+    graphrag_query_facts_per_entity: int = 15      # 每个命中实体最多取的一跳关系事实数
+    graphrag_query_hop_quotas: str = "12,10,4,4"   # 图扩展每跳名额(第1..4跳),不足的让给其余候选
+    graphrag_query_path_facts: int = 10            # 多跳关系链事实最多条数
 
     # 路由(离线/实时分流阈值)
     graphrag_route_file_size_mb: int = 10
@@ -182,4 +198,135 @@ class Settings(BaseSettings):
         )
 
 
+# ====================================================================
+# Nacos 配置中心：全量迁入后 .env 以 Nacos 为唯一事实源，本地只留 NACOS_*。
+# NACOS_ENABLED=false 时完全等同旧行为。qingxi 的 settings 是 import 时冻结的
+# 单例（约 133 处 `settings.X` 直接读），热更新靠「原地 mutate 同一对象」实现，
+# 绝不重绑定模块级 settings / SessionLocal（避免 import 绑定坑）。
+# ====================================================================
+
+
+class _BootstrapSettings(BaseSettings):
+    """只读 NACOS_* bootstrap 键；其余键 extra=ignore。"""
+
+    model_config = SettingsConfigDict(env_file=str(_ROOT / ".env"), extra="ignore")
+
+    nacos_enabled: bool = False
+    nacos_server_addr: str = "http://127.0.0.1:8848"
+    nacos_namespace: str = ""
+    nacos_group: str = "DEFAULT_GROUP"
+    nacos_username: str = ""
+    nacos_password: str = ""
+    nacos_data_ids: str = "qingxi.env"
+
+
+def _nacos_client():
+    from common.nacos_client import NacosConfigClient  # 已把仓库根加进 sys.path
+    b = _BootstrapSettings()
+    return NacosConfigClient(b.nacos_server_addr, namespace=b.nacos_namespace,
+                             group=b.nacos_group, username=b.nacos_username,
+                             password=b.nacos_password)
+
+
+def _nacos_data_ids() -> list[str]:
+    return [d.strip() for d in _BootstrapSettings().nacos_data_ids.split(",") if d.strip()]
+
+
+def _bootstrap_nacos() -> None:
+    """启动期从 Nacos 拉 qingxi.env -> os.environ（须在 settings 构造前调用）。"""
+    b = _BootstrapSettings()
+    if not b.nacos_enabled:
+        return
+    try:
+        from common.nacos_client import parse_properties
+        client = _nacos_client()
+    except Exception as e:
+        log.error("nacos bootstrap 失败（回退本地 .env）: %s", e)
+        return
+    for data_id in _nacos_data_ids():
+        try:
+            content = client.get_config(data_id)
+        except Exception as e:
+            log.error("nacos get_config %s failed（回退本地 .env）: %s", data_id, e)
+            continue
+        env = parse_properties(content)
+        os.environ.update(env)
+        log.info("loaded from Nacos dataId=%s（%d keys）", data_id, len(env))
+
+
+_bootstrap_nacos()
 settings = Settings()
+
+
+def get_settings() -> "Settings":
+    """返回同一冻结单例（别名，身份稳定；供未来测试/对称 retrieval）。"""
+    return settings
+
+
+# 变更后需「重启」才真正生效的字段（喂给 import 期 engine / 懒加载模型缓存 /
+# 进程全局 pymilvus 连接，后台线程拆建风险大于收益）。
+def _requires_restart(name: str) -> bool:
+    u = name.upper()
+    if u in ("UPLOAD_DIR", "OUTPUT_DIR", "IQ_COLLECTION", "IQ_DIM", "IQ_MODEL_DIR",
+             "IQ_XGB_MODEL_PATH", "IQ_CNN_MODEL_PATH", "IQ_LABEL_MAP_PATH",
+             "IQ_BUQUAN_MODEL_PATH", "IQ_EMBEDDING_MODEL_PATH"):
+        return True
+    for p in ("POSTGRES_", "MILVUS_", "NEO4J_", "MINIO_", "KAFKA_", "ASR_", "BLIP_",
+              "TRANSLATOR_", "GRAPHRAG_EMBEDDING_"):
+        if u.startswith(p):
+            return True
+    return False
+
+
+def reload_settings() -> list[str]:
+    """原地刷新冻结单例：新实例化 Settings() 拿类型强转后的值，逐字段 setattr 写回。
+
+    返回发生变化的字段名列表。绝不重绑定模块级 settings。
+    """
+    fresh = Settings()  # 读 os.environ（优先于 .env），类型强转
+    changed: list[str] = []
+    for name, value in fresh.model_dump().items():
+        if getattr(settings, name) != value:
+            setattr(settings, name, value)  # validate_assignment=False，值已强转
+            changed.append(name)
+    return changed
+
+
+def apply_nacos_change(data_id: str, content: str) -> None:
+    """Nacos 变更回调（watcher 线程调用）：只处理 qingxi.env。失败回滚 env。"""
+    from common.nacos_client import parse_properties
+    if data_id != "qingxi.env":
+        log.warning("nacos 忽略未知 dataId=%s（service A 只监听 qingxi.env）", data_id)
+        return
+    new_env = parse_properties(content)
+    old = {k: os.environ.get(k) for k in new_env}
+    os.environ.update(new_env)
+    try:
+        changed = reload_settings()
+    except Exception as e:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        log.error("nacos env change rejected（回滚旧值）: %s", e)
+        return
+    if not changed:
+        log.info("nacos env applied（无字段变化）")
+        return
+    restart = [c for c in changed if _requires_restart(c)]
+    log.info("nacos env applied, changed=%s", changed)
+    if restart:
+        log.warning("配置变更需重启才生效: %s（POSTGRES_* 可调 reload_engine()）", restart)
+
+
+def start_nacos_watcher() -> None:
+    """启动 Nacos 变更监听 daemon 线程（enabled 才起）。main.lifespan 调用。"""
+    if not _BootstrapSettings().nacos_enabled:
+        return
+    client = _nacos_client()
+    stop = threading.Event()
+    threading.Thread(target=client.watch,
+                     args=(_nacos_data_ids(), apply_nacos_change, stop),
+                     name="qingxi-nacos-watch", daemon=True).start()
+    log.info("nacos watcher started（dataIds=%s）", _nacos_data_ids())

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
+import threading
 from functools import lru_cache
 from pathlib import Path
 
@@ -19,6 +21,9 @@ log = logging.getLogger("retrieval.config")
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = ROOT / "config"
+_REPO_ROOT = ROOT.parent  # 仓库根（common/ 所在），供导入共享 Nacos client
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 
 class Settings(BaseSettings):
@@ -94,6 +99,7 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    bootstrap_nacos()
     s = Settings()  # type: ignore[call-arg]  # 值全部来自 .env
     # 后端通道校验（fake 只能用于 dev/测试，禁止上生产）
     if s.retrieval_backend not in ("fake", "real"):
@@ -129,7 +135,13 @@ def get_settings() -> Settings:
 
 @lru_cache
 def load_yaml(name: str) -> dict:
-    """读取 config/<name>.yaml；文件缺失即启动失败（yaml 即契约，IF-8）。"""
+    """读取 config/<name>.yaml；Nacos 迁移后以 Nacos 内容优先，否则回退本地文件。
+
+    文件缺失即启动失败（yaml 即契约，IF-8）。
+    """
+    bootstrap_nacos()
+    if name in _NACOS_YAML:
+        return yaml.safe_load(_NACOS_YAML[name]) or {}
     p = CONFIG_DIR / f"{name}.yaml"
     if not p.exists():
         raise FileNotFoundError(f"config contract missing: {p}")
@@ -255,3 +267,136 @@ def reset_caches() -> None:
     load_yaml.cache_clear()
     retrieval_cfg.cache_clear()
     query_parser_cfg.cache_clear()
+
+
+# ====================================================================
+# Nacos 配置中心：全量迁入后 .env / config/*.yaml 以 Nacos 为唯一事实源。
+# 本地 .env 只留 NACOS_* bootstrap 键。NACOS_ENABLED=false 时完全等同旧行为。
+# ====================================================================
+
+_NACOS_YAML: dict[str, str] = {}      # yaml 名（无 .yaml 后缀）-> Nacos 原文
+_nacos_bootstrapped = False
+
+
+class _BootstrapSettings(BaseSettings):
+    """只读 NACOS_* bootstrap 键；其余键 extra=ignore。"""
+
+    model_config = SettingsConfigDict(env_file=str(ROOT / ".env"), extra="ignore")
+
+    nacos_enabled: bool = False
+    nacos_server_addr: str = "http://127.0.0.1:8848"
+    nacos_namespace: str = ""
+    nacos_group: str = "DEFAULT_GROUP"
+    nacos_username: str = ""
+    nacos_password: str = ""
+    nacos_data_ids: str = "retrieval.env,retrieval.yaml,query_parser.yaml,relations.yaml"
+
+
+def _nacos_enabled() -> bool:
+    return _BootstrapSettings().nacos_enabled
+
+
+def _nacos_client():
+    from common.nacos_client import NacosConfigClient  # 已把仓库根加进 sys.path
+    b = _BootstrapSettings()
+    return NacosConfigClient(b.nacos_server_addr, namespace=b.nacos_namespace,
+                             group=b.nacos_group, username=b.nacos_username,
+                             password=b.nacos_password)
+
+
+def _nacos_data_ids() -> list[str]:
+    return [d.strip() for d in _BootstrapSettings().nacos_data_ids.split(",") if d.strip()]
+
+
+def bootstrap_nacos() -> None:
+    """从 Nacos 拉取配置注入（幂等，只跑一次）；disabled 即 no-op。
+
+    retrieval.env -> os.environ（pydantic-settings env 优先于 .env）；
+    retrieval.yaml / query_parser.yaml / relations.yaml -> _NACOS_YAML（load_yaml 优先读）。
+    """
+    global _nacos_bootstrapped
+    if _nacos_bootstrapped:
+        return
+    _nacos_bootstrapped = True  # 先置位，防递归/重复
+    if not _nacos_enabled():
+        log.info("nacos disabled，使用本地 .env / config/*.yaml")
+        return
+    from common.nacos_client import parse_properties
+    client = _nacos_client()
+    for data_id in _nacos_data_ids():
+        try:
+            content = client.get_config(data_id)
+        except Exception as e:
+            log.error("nacos get_config %s failed（回退本地）: %s", data_id, e)
+            continue
+        if data_id == "retrieval.env":
+            env = parse_properties(content)
+            os.environ.update(env)
+            log.info("loaded from Nacos dataId=%s（%d keys）", data_id, len(env))
+        elif data_id.endswith(".yaml"):
+            name = data_id[:-5]
+            _NACOS_YAML[name] = content
+            log.info("loaded from Nacos dataId=%s", data_id)
+
+
+def apply_nacos_change(data_id: str, content: str) -> None:
+    """Nacos 变更回调（watcher 线程调用）：先校验、成功才生效，失败回滚保留旧值。
+
+    - retrieval.env：快照旧 env -> 更新 -> reset_caches + get_settings 重校验；失败回滚。
+    - *.yaml：yaml.safe_load 校验 -> 置 _NACOS_YAML -> reset_caches + get_settings 重校验；失败回滚。
+    """
+    from common.nacos_client import parse_properties
+    if data_id == "retrieval.env":
+        new_env = parse_properties(content)
+        old = {k: os.environ.get(k) for k in new_env}
+        os.environ.update(new_env)
+        try:
+            reset_caches()
+            get_settings()  # 重校验（缺必需变量/模型契约失败会抛异常）
+            log.info("nacos env applied（%d keys）", len(new_env))
+        except Exception as e:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            reset_caches()
+            log.error("nacos env change rejected（回滚旧值）: %s", e)
+        return
+
+    if not data_id.endswith(".yaml"):
+        log.warning("nacos 忽略未知 dataId=%s", data_id)
+        return
+    name = data_id[:-5]
+    try:
+        parsed = yaml.safe_load(content)
+        if not isinstance(parsed, dict):
+            raise ValueError("yaml 顶层必须是 dict")
+    except Exception as e:
+        log.error("nacos yaml change rejected（非法 yaml）: %s", e)
+        return
+    old = _NACOS_YAML.get(name)
+    _NACOS_YAML[name] = content
+    try:
+        reset_caches()
+        get_settings()  # 连带模型契约校验
+        log.info("nacos yaml applied: %s", data_id)
+    except Exception as e:
+        if old is None:
+            _NACOS_YAML.pop(name, None)
+        else:
+            _NACOS_YAML[name] = old
+        reset_caches()
+        log.error("nacos yaml change rejected（回滚旧值）: %s", e)
+
+
+def start_nacos_watcher() -> None:
+    """启动 Nacos 变更监听 daemon 线程（enabled 才起）。main._startup 调用。"""
+    if not _nacos_enabled():
+        return
+    client = _nacos_client()
+    stop = threading.Event()
+    threading.Thread(target=client.watch,
+                     args=(_nacos_data_ids(), apply_nacos_change, stop),
+                     name="retrieval-nacos-watch", daemon=True).start()
+    log.info("nacos watcher started（dataIds=%s）", _nacos_data_ids())

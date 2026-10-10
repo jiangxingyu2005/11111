@@ -1,0 +1,191 @@
+# qingxi 全栈本地 Docker
+# 启动: docker compose up -d --build
+# 应用: http://127.0.0.1:8001   检索: http://127.0.0.1:8100   MinerU: http://127.0.0.1:8008
+# 对象存储用 SeaweedFS（MinIO 社区版已停发）；Milvus 宿主机端口 18530（Windows 保留了 19530）
+
+services:
+  postgres:
+    image: docker.m.daocloud.io/library/postgres:16-alpine
+    container_name: qingxi-pg
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      TZ: Asia/Shanghai
+    ports:
+      - "5434:5432"
+    volumes:
+      - qingxi-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: qingxi-etcd
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    volumes:
+      - qingxi-etcd:/etcd
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: docker.m.daocloud.io/chrislusf/seaweedfs:3.69
+    container_name: qingxi-minio
+    command: ["server", "-ip=minio", "-dir=/data", "-filer", "-s3", "-s3.port=9000", "-s3.config=/etc/seaweed/s3.json"]
+    ports:
+      - "9000:9000"
+      - "9001:8888"
+    volumes:
+      - qingxi-minio:/data
+      - ./deploy/seaweed-s3.json:/etc/seaweed/s3.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9333/cluster/status || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  milvus:
+    image: docker.m.daocloud.io/milvusdb/milvus:v2.4.13
+    container_name: qingxi-milvus
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: minioadmin
+      MINIO_SECRET_ACCESS_KEY: minioadmin
+    volumes:
+      - qingxi-milvus:/var/lib/milvus
+    ports:
+      - "18530:19530"
+      - "9091:9091"
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+
+  neo4j:
+    image: docker.m.daocloud.io/library/neo4j:5.20-community
+    container_name: qingxi-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/testpassword
+      NEO4J_PLUGINS: "[]"
+      NEO4J_dbms_memory_heap_max__size: 1G
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - qingxi-neo4j:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p testpassword 'RETURN 1' | grep -q 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+
+  mineru:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.mineru
+    image: qingxi-mineru:local
+    container_name: qingxi-mineru
+    environment:
+      MINERU_MODEL_SOURCE: modelscope
+    ports:
+      - "8008:8000"
+    volumes:
+      - mineru-models:/root/.cache
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/v1/health"]
+      interval: 20s
+      timeout: 8s
+      start_period: 180s
+      retries: 30
+
+  qingxi:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.qingxi
+    image: qingxi-app:local
+    container_name: qingxi-app
+    env_file:
+      - .env
+      - deploy/qingxi.docker.env
+    ports:
+      - "8003:8001"
+    volumes:
+      - ./model:/app/model
+      - ./retrieval/model/models/BAAI--bge-m3/snapshots/master:/app/model/bge-m3:ro
+      - ./output:/app/output
+      - ./uploads:/app/uploads
+      # 开发态:挂载源码,改代码后 `docker compose restart qingxi` 即生效,不必重建镜像。
+      # 内网交付时去掉这两行,镜像内已 COPY 同一份代码。
+      - ./app:/app/app:ro
+      - ./common:/app/common:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      mineru:
+        condition: service_started
+
+  retrieval:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.retrieval
+    image: qingxi-retrieval:local
+    container_name: qingxi-retrieval
+    environment:
+      NACOS_ENABLED: "false"
+      RETRIEVAL_BACKEND: fake
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DATABASE: postgres
+      MILVUS_HOST: milvus
+      MILVUS_PORT: 19530
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: testpassword
+      RETRIEVAL_EMBED_MODE: remote
+      RETRIEVAL_EMBED_URL: ""
+      GRAPHRAG_LLM_BASE_URL: ""
+      GRAPHRAG_LLM_MODEL: ""
+      RETRIEVAL_RERANK_SERVICE_URL: ""
+      EMBED_BACKEND: hash
+      RERANK_BACKEND: hash
+      LLM_BACKEND: echo
+    ports:
+      - "8100:8100"
+    working_dir: /app/retrieval
+
+volumes:
+  qingxi-pgdata:
+  qingxi-etcd:
+  qingxi-minio:
+  qingxi-milvus:
+  qingxi-neo4j:
+  mineru-models:
