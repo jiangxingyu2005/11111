@@ -13,6 +13,7 @@ class CleanStats(BaseModel):
     removed_headers: int = 0
     removed_short_blocks: int = 0
     removed_duplicates: int = 0
+    removed_detail: list = []   # {rule, line_no, text}, 最多 200 条,缺省空列表兼容旧客户端
 
 
 class FileArtifacts(BaseModel):

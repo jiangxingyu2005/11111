@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -23,7 +24,7 @@ from ..schemas import (
 from ..utils.asr import transcribe_audio
 from ..utils.blip import caption_image
 from ..utils.translator import translate_en_zh
-from ..utils.cleaning import clean, strip_image_refs
+from ..utils.cleaning import CLEAN_RULESET_VERSION, clean, strip_image_refs
 from ..utils.database import SessionLocal
 from ..utils.document import create_document, mark_document_in_kb
 from ..graphrag.ingest import ingest_document
@@ -126,6 +127,8 @@ async def _finalize(
         "job_id": raw_entry.get("job_id"),
         "job_status": raw_entry.get("job_status"),
         "stats": stats,
+        "content_sha256": hashlib.sha256((raw_md or "").encode("utf-8")).hexdigest(),
+        "clean_ruleset_version": CLEAN_RULESET_VERSION,
     }
 
     # clean.json 存清洗后产物,与 raw.json(原始数据)区分开
