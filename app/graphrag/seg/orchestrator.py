@@ -99,7 +99,7 @@ async def edit_segment(session: AsyncSession, milvus: AsyncMilvusClient,
 
     # ⑤ 差量校正(Neo4j 节点 + BINDS)
     for e in entities:
-        await neo4j.merge_entity(e.to_dict())
+        await neo4j.merge_entity(e.to_dict(), overwrite=False)
     for r in relations:
         await neo4j.merge_relation(r.to_dict())
     target_binds = {e.entity_id: e for e in entities if e.source_parent_id == parent_id}

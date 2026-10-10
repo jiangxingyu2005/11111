@@ -29,8 +29,15 @@ def _norm_freq(freq: str) -> str:
     return str(freq).strip().lower().replace(" ", "")
 
 
+_MIN_FP_PARTS = 2   # 至少两项参数才算指纹:单凭频率会把同频段的不同辐射源并成一个
+
+
 def fingerprint(properties: dict) -> Optional[str]:
-    """属性指纹：频段 + 脉宽 + 重频（容差内取整）。缺字段则为 None。"""
+    """属性指纹：频段 + 脉宽 + 重频（容差内取整），至少两项才生成，否则为 None。
+
+    只有频率时不生成:同频段的不同雷达很常见(如两部 X 波段雷达、两部 850MHz 干扰机),
+    单靠频率做确定性合并会把它们并成一个节点。
+    """
     if not properties:
         return None
     parts: list[str] = []
@@ -44,7 +51,7 @@ def fingerprint(properties: dict) -> Optional[str]:
         parts.append("pw:" + _round_tol(pw, 0.5))
     if prf is not None:
         parts.append("prf:" + _round_tol(prf, 100.0))
-    return "|".join(parts) if parts else None
+    return "|".join(parts) if len(parts) >= _MIN_FP_PARTS else None
 
 
 class EntityRegistry:

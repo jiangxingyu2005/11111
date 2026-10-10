@@ -173,7 +173,7 @@ class Settings(BaseSettings):
     graphrag_resolve_enabled: bool = True        # 主开关:入库时对齐到全局注册表
     graphrag_resolve_fingerprint: bool = True    # ① 指纹路径
     graphrag_resolve_vector_enabled: bool = True  # ② 向量层(ems_entities 语义匹配)
-    graphrag_resolve_sim_high: float = 0.62      # 自动并阈值(bge-large-zh-v1.5 实测校准;换模型需重校准)
+    graphrag_resolve_sim_high: float = 0.62      # 已不再用于自动合并(名称向量分不清相似但不同的实体);保留供离线校验脚本
     graphrag_resolve_sim_low: float = 0.55       # 灰区下界
     graphrag_resolve_llm_gate: bool = False      # ③ 灰区交 LLM(默认关)
     graphrag_resolve_topk: int = 5               # 向量召回 top-k

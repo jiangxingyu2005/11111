@@ -44,9 +44,9 @@ async def import_graph(neo4j: Neo4jClient, entities: list[Entity], relations: li
     if errors:
         raise ValueError("表外 ID 校验失败,零节点写入:\n" + "\n".join(errors))
 
-    # ① 实体节点
+    # ① 实体节点(合并写:跨文档对齐到已有实体时不覆盖先入库文档的名称/属性/别名)
     for e in entity_dicts:
-        await neo4j.merge_entity(e)
+        await neo4j.merge_entity(e, overwrite=False)
     # ② 父块 Segment + BINDS
     for p in parents:
         await neo4j.merge_segment(p)

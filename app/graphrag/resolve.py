@@ -1,7 +1,7 @@
 """实体消歧解析引擎:三阶段匹配(①确定性 ②向量 ③LLM 灰区)接到真实 PG/Milvus/Neo4j。
 
 - resolve_deterministic:名称/别名/指纹查 entity_registry(类型作用域)。
-- resolve_vector:实体名向量查 Milvus ems_entities(类型作用域,COSINE)。
+- resolve_vector:实体名向量查 Milvus ems_entities(类型作用域,COSINE),只找候选,LLM 判断同一才合并。
 - align:抽取结果对齐到全局 canonical(原地 remap entity_id + 关系 head/tail,自环丢弃)。
 - persist:canonical 实体写回 entity_registry + ems_entities(幂等,name 首现者赢、aliases 并集)。
 - global_resolve:全图批量对账(DSU 求 canonical + 四层回填 PG/Neo4j/Milvus)。
@@ -85,9 +85,19 @@ async def resolve_deterministic(session: AsyncSession, name: str, entity_type: s
     return None
 
 
+def _vector_merge_ok(score: float) -> bool:
+    """向量分数本身不足以合并,只决定要不要交给 LLM 判断。
+
+    名称向量分不清「名字像但不是同一个」:BGE-M3 下 对空搜索雷达/对海搜索雷达 0.909、
+    甲干扰机/乙干扰机 0.787,反而高于真同一的 Iskander-M/伊斯坎德尔-M(0.592),任何阈值都两头错。
+    所以 ≥sim_low 只是候选,是否合并由 LLM 判断(llm_gate 开启时);gate 关闭时不经向量合并。
+    """
+    return score >= settings.graphrag_resolve_sim_low and settings.graphrag_resolve_llm_gate
+
+
 async def resolve_vector(milvus, embeddings, llm, name: str, entity_type: str,
                          mergeable: Optional[set] = None) -> Optional[str]:
-    """匹配器②③:实体名向量相似度(类型作用域)。≥sim_high 自动并,灰区交 LLM。
+    """匹配器②③:实体名向量相似度(类型作用域)只找候选,LLM 判断同一才合并。
 
     mergeable=None 表示不限制(向后兼容);传入可向量化类型集合时,集合外的类型直接跳过
     (参数值/枚举类实体不走向量层,只走确定性)。
@@ -104,10 +114,7 @@ async def resolve_vector(milvus, embeddings, llm, name: str, entity_type: str,
     if not top:
         return None
     eid, cname, score = top[0]
-    if score >= settings.graphrag_resolve_sim_high:
-        return eid
-    if (score >= settings.graphrag_resolve_sim_low
-            and settings.graphrag_resolve_llm_gate and llm is not None):
+    if _vector_merge_ok(score) and llm is not None:
         same = await asyncio.to_thread(llm.judge_same_entity, name, cname, entity_type)
         if same:
             return eid
@@ -267,7 +274,7 @@ async def global_resolve(session: AsyncSession, neo4j, milvus, embeddings, llm,
     for group in by_fp.values():
         _union_group(dsu, group)
 
-    # ② 向量命中 union(≥sim_high 并;灰区交 LLM,默认关);只对可向量化类型(参数值类跳过)
+    # ② 向量只找候选,LLM 判断同一才 union(llm_gate 关闭时不经向量合并);只对可向量化类型(参数值类跳过)
     mergeable = await _load_mergeable(session, milvus, embeddings)
     if settings.graphrag_resolve_vector_enabled and milvus is not None and embeddings is not None:
         for r in rows:
@@ -284,10 +291,7 @@ async def global_resolve(session: AsyncSession, neo4j, milvus, embeddings, llm,
             for (eid, cname, score) in top:
                 if eid == r["entity_id"]:
                     continue
-                if score >= settings.graphrag_resolve_sim_high:
-                    dsu.union(r["entity_id"], eid)
-                elif (score >= settings.graphrag_resolve_sim_low
-                      and settings.graphrag_resolve_llm_gate and llm is not None):
+                if _vector_merge_ok(score) and llm is not None:
                     same = await asyncio.to_thread(llm.judge_same_entity,
                                                    r["name"], cname, r["entity_type"])
                     if same:

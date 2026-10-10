@@ -13,6 +13,17 @@ from typing import Optional
 
 from .config import build_settings
 
+
+def _as_dict(v) -> dict:
+    """properties 可能是 dict 或 JSON 字符串(Neo4j 里按字符串存),统一转成 dict。"""
+    if isinstance(v, dict):
+        return dict(v)
+    try:
+        d = json.loads(v) if v else {}
+    except (TypeError, ValueError):
+        return {}
+    return d if isinstance(d, dict) else {}
+
 CONSTRAINTS_CYPHER = Path(__file__).resolve().parent / "sql" / "03_neo4j_constraints.cypher"
 
 
@@ -55,18 +66,48 @@ class Neo4jClient:
                 await self.run(stmt)
 
     # ---- 三步导入 ----
-    async def merge_entity(self, entity: dict) -> None:
+    async def merge_entity(self, entity: dict, overwrite: bool = True) -> None:
+        """写实体节点。
+
+        overwrite=True(默认,人工增改接口):用传入值整体覆盖。
+        overwrite=False(入库/增量重抽):节点已存在时合并而不是覆盖——
+          名称、类型保持首次写入的值(与 PG 注册表「名称首现者赢」一致),别名取并集(含本次名称),
+          属性只补缺不改已有值,置信度取较大值。否则跨文档对齐到同一实体时,后入库的文档会把
+          先入库文档的名称、属性、别名冲掉(问答按 Neo4j 别名匹配实体,别名丢了就查不到)。
+        """
+        props = _as_dict(entity.get("properties"))
+        if not overwrite:
+            cur = await self.run(
+                "MATCH (e:Entity {entity_id: $id}) RETURN e.name AS name, e.entity_type AS entity_type, "
+                "e.aliases AS aliases, e.properties AS properties, e.confidence AS confidence",
+                id=entity["entity_id"])
+            if cur:
+                c = cur[0]
+                aliases: list = []
+                seen: set = set()
+                for a in list(c.get("aliases") or []) + list(entity.get("aliases") or []) + [entity["name"]]:
+                    k = "".join(str(a).split()).lower()
+                    if a and k not in seen:
+                        seen.add(k)
+                        aliases.append(a)
+                merged = _as_dict(c.get("properties"))
+                for k, v in props.items():
+                    if v not in (None, "") and merged.get(k) in (None, ""):
+                        merged[k] = v
+                entity = dict(entity, name=c.get("name") or entity["name"],
+                              entity_type=c.get("entity_type") or entity["entity_type"],
+                              aliases=aliases,
+                              confidence=max(float(c.get("confidence") or 0.0),
+                                             float(entity.get("confidence", 1.0))))
+                props = merged
         # Neo4j 不接受嵌套 map 作为属性值,properties 序列化为 JSON 字符串落库
-        props = entity["properties"]
-        if not isinstance(props, str):
-            props = json.dumps(props, ensure_ascii=False)
         await self.run(
             "MERGE (e:Entity {entity_id: $entity_id}) "
             "SET e.name = $name, e.entity_type = $entity_type, "
             "e.aliases = $aliases, e.properties = $properties, e.confidence = $confidence",
             entity_id=entity["entity_id"], name=entity["name"],
             entity_type=entity["entity_type"], aliases=entity.get("aliases", []),
-            properties=props, confidence=entity.get("confidence", 1.0),
+            properties=json.dumps(props, ensure_ascii=False), confidence=entity.get("confidence", 1.0),
         )
 
     async def merge_segment(self, parent: dict) -> None:
