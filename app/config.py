@@ -188,6 +188,11 @@ class Settings(BaseSettings):
     graphrag_quality_min_binds_coverage: float = 0.3   # BINDS 覆盖率门禁(低于 → healthy=false)
     graphrag_quality_max_empty_ratio: float = 0.5      # 空图谱文档占比门禁(超 → healthy=false)
 
+    # 提及覆盖:bind_only=只挂别名,仅型号编码/标题+型号可建节点;create=旧行为;off=关掉
+    graphrag_mentions_cover_mode: str = "bind_only"
+    graphrag_entity_name_max_len: int = 24
+    graphrag_alias_max_len: int = 40
+
     @property
     def output_formats(self) -> list[str]:
         return [f.strip() for f in self.mineru_output_formats.split(",") if f.strip()]

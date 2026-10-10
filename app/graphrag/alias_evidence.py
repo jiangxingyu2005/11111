@@ -56,6 +56,11 @@ def _clean_alias(s: str) -> str | None:
         return None
     if _PARAM_RE.match(s.replace(" ", "")):
         return None
+    from .name_gate import looks_like_entity_name
+    if not looks_like_entity_name(s):
+        return None
+    if len(s) > 40:
+        return None
     return s
 
 

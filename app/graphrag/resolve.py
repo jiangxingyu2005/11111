@@ -20,6 +20,7 @@ from ..models import EntityRegistryEntry, ParentDocument, PendingExtraction
 from . import db
 from . import dict as dict_store
 from .disambig.dsu import DSU
+from .countries import canon as _country_canon
 from .ids import normalize_name
 from .mesh.registry import fingerprint
 from .models import Entity, Relation
@@ -82,10 +83,6 @@ async def resolve_deterministic(session: AsyncSession, name: str, entity_type: s
     return None
 
 
-_COUNTRY = {"俄罗斯": "俄罗斯", "russia": "俄罗斯", "苏联": "俄罗斯", "美国": "美国", "usa": "美国", "us": "美国",
-            "unitedstates": "美国", "中国": "中国", "china": "中国", "英国": "英国", "uk": "英国",
-            "法国": "法国", "france": "法国", "德国": "德国", "germany": "德国", "以色列": "以色列",
-            "israel": "以色列", "日本": "日本", "japan": "日本", "印度": "印度", "india": "印度"}
 _judge_cache: dict[tuple, dict] = {}
 
 
@@ -95,8 +92,8 @@ def _veto(props_a: dict, codes_a: set, props_b: dict, codes_b: set) -> Optional[
     不比粒度:LLM 填的粒度经常不准,当硬否决会挡住真同一。
     """
     from .mesh.derived import _freq_interval
-    ca = _COUNTRY.get(normalize_name((props_a or {}).get("国别", "")))
-    cb = _COUNTRY.get(normalize_name((props_b or {}).get("国别", "")))
+    ca = _country_canon((props_a or {}).get("国别", ""))
+    cb = _country_canon((props_b or {}).get("国别", ""))
     if ca and cb and ca != cb:
         return f"国别不同({ca}/{cb})"
     if codes_a and codes_b and not (codes_a & codes_b):

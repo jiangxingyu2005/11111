@@ -511,7 +511,9 @@ class Neo4jClient:
         return await self.run(
             "MATCH (x:Entity)-[r]-(y:Entity) WHERE elementId(x) IN $frontier "
             "AND type(r) <> 'BINDS' AND NOT coalesce(r.derived, false) "
-            "AND NOT elementId(y) IN $visited" + scope + " "
+            "AND NOT elementId(y) IN $visited"
+            " AND NOT (y.entity_type = '组织' AND coalesce(y.properties,'') CONTAINS '\"origin\": \"country\"')"
+            + scope + " "
             "WITH y, x, r, coalesce(r.confidence, 0.0) AS conf ORDER BY conf DESC "
             "WITH y, collect({prev: elementId(x), rel: type(r), "
             "dir: CASE WHEN startNode(r) = x THEN 'out' ELSE 'in' END, conf: conf})[0] AS via "

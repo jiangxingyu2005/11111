@@ -23,6 +23,7 @@ from .ids import canonical_entity_id, normalize_name
 from .llm import LLMClient
 from .mentions import cover_mentions
 from .models import Entity
+from .name_gate import looks_like_entity_name
 
 # 需求(10):频率/脉宽/重频/调制等是「属性」不是实体。名字只是参数值的,拒收进 pending。
 _PARAM_VALUE_RE = re.compile(
@@ -52,6 +53,8 @@ def _validate(raw: dict, allowed_types: list) -> list[str]:
         errors.append(f"参数值不是实体: {name!r}(应写入所属实体 properties)")
     elif is_garbled_name(str(name)):
         errors.append(f"实体名含乱码,丢弃: {name!r}")
+    elif not looks_like_entity_name(str(name)):
+        errors.append(f"实体名不像实体名: {name!r}(形态闸门)")
     if not etype or str(etype).strip() not in allowed_types:
         errors.append(f"entity_type 非法: {etype!r}")
     if conf is None or not isinstance(conf, (int, float)) or not (0.0 <= conf <= 1.0):
@@ -131,10 +134,12 @@ async def extract(session: AsyncSession, llm: Optional[LLMClient], parents: list
             name = normalize_name(raw["name"])
             eid = canonical_entity_id(name, raw["entity_type"])
             if eid not in registry:
+                props = dict(raw.get("properties", {}) or {})
+                props.setdefault("origin", "llm")
+                aliases = [a for a in (raw.get("aliases") or []) if looks_like_entity_name(str(a))]
                 registry[eid] = Entity(
                     entity_id=eid, name=name, entity_type=raw["entity_type"],
-                    aliases=list(raw.get("aliases", []) or []),
-                    properties=dict(raw.get("properties", {}) or {}),
+                    aliases=aliases, properties=props,
                     confidence=float(conf), source_parent_id=p["parent_id"],
                 )
             else:
