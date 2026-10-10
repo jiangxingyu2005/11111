@@ -78,6 +78,31 @@ class LLMClient:
             return self._judge_same_openai(name_a, name_b, entity_type)
         return False
 
+    def judge_entity_detail(self, name_a: str, props_a: dict, name_b: str, props_b: dict,
+                            entity_type: str) -> dict:
+        """消歧第 ③ 层:带属性判断两个实体是否同一,返回 {same, confidence, reason}。mock 恒判不同。"""
+        if not self.is_llm:
+            return {"same": False, "confidence": 0.0, "reason": "mock"}
+        schema = {
+            "type": "object",
+            "properties": {"same": {"type": "boolean"}, "confidence": {"type": "number"},
+                           "reason": {"type": "string"}},
+            "required": ["same", "confidence"],
+        }
+        instruction = ("判断两个实体是否指同一个装备型号或同一个实体。只有确定时才判 same=true,例如同一型号的"
+                       "中英文名/音译、全称与简称、型号编码一致。以下情况一律 same=false:只是名字相似、"
+                       "一个是泛称一个是具体型号、用途或型号不同(如对空搜索雷达与对海搜索雷达、甲干扰机与乙干扰机)、"
+                       "属性矛盾。拿不准时 same=false。confidence 为 0~1。")
+        fmt = lambda p: json.dumps({k: v for k, v in (p or {}).items() if v}, ensure_ascii=False)[:300]
+        text = (f"实体类型：{entity_type}\n实体 A：{name_a}  属性：{fmt(props_a)}\n"
+                f"实体 B：{name_b}  属性：{fmt(props_b)}")
+        try:
+            r = _call_function(self._client(), self.settings["llm"], "judge_entity", instruction, text, schema)
+        except Exception:
+            return {"same": False, "confidence": 0.0, "reason": "llm_error"}
+        return {"same": bool(r.get("same")), "confidence": float(r.get("confidence") or 0.0),
+                "reason": str(r.get("reason") or "")[:200]}
+
     def _judge_same_openai(self, name_a: str, name_b: str, entity_type: str) -> bool:
         schema = {
             "type": "object",
@@ -274,6 +299,8 @@ def _output_example(name: str) -> str:
                 '"rel_type": "EQUIPPED_ON", "confidence": 0.9, "evidence": "装备于地面车载平台"}]}')
     if name == "judge_same_entity":
         return '{"same": true}'
+    if name == "judge_entity":
+        return '{"same": false, "confidence": 0.9, "reason": "用途不同"}'
     return '{"' + name + '": []}'
 
 

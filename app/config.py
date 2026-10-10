@@ -175,8 +175,10 @@ class Settings(BaseSettings):
     graphrag_resolve_vector_enabled: bool = True  # ② 向量层(ems_entities 语义匹配)
     graphrag_resolve_sim_high: float = 0.62      # 已不再用于自动合并(名称向量分不清相似但不同的实体);保留供离线校验脚本
     graphrag_resolve_sim_low: float = 0.55       # 灰区下界
-    graphrag_resolve_llm_gate: bool = False      # ③ 灰区交 LLM(默认关)
+    graphrag_resolve_llm_gate: bool = False      # ③ 向量候选交 LLM 判断(关闭时不经向量合并)
     graphrag_resolve_topk: int = 5               # 向量召回 top-k
+    graphrag_resolve_judge_topk: int = 3         # 每个实体最多交 LLM 判断的候选数(控制入库成本)
+    graphrag_resolve_judge_confidence: float = 0.8   # LLM 两次都判同一且置信度不低于此值才合并
     graphrag_entity_collection: str = "ems_entities"  # 实体名向量库名(Milvus,消歧用)
 
     # 漏抽质检门禁(入库质检 + /graph/quality 健康度;默认值待真实数据校准)

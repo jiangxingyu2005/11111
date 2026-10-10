@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models import PendingExtraction
 from . import db
 from .config import get
+from .alias_evidence import add_alias_evidence
 from .coref import merge_mentions
 from .ids import canonical_entity_id, normalize_name
 from .llm import LLMClient
@@ -139,4 +140,6 @@ async def extract(session: AsyncSession, llm: Optional[LLMClient], parents: list
     entities, notes = merge_mentions(entities, parents)
     for note in notes:
         await db.insert(session, PendingExtraction, note)
+    # 消歧第 ① 层:原文同指写法(括号对照/又称/即)与型号编码写成别名,供跨文档确定性合并
+    add_alias_evidence(entities, parents)
     return entities

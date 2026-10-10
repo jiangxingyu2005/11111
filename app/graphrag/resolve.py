@@ -19,7 +19,7 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
-from ..models import EntityRegistryEntry, ParentDocument
+from ..models import EntityRegistryEntry, ParentDocument, PendingExtraction
 from . import db
 from . import dict as dict_store
 from .disambig.dsu import DSU
@@ -85,39 +85,88 @@ async def resolve_deterministic(session: AsyncSession, name: str, entity_type: s
     return None
 
 
-def _vector_merge_ok(score: float) -> bool:
-    """向量分数本身不足以合并,只决定要不要交给 LLM 判断。
+_COUNTRY = {"俄罗斯": "俄罗斯", "russia": "俄罗斯", "苏联": "俄罗斯", "美国": "美国", "usa": "美国", "us": "美国",
+            "unitedstates": "美国", "中国": "中国", "china": "中国", "英国": "英国", "uk": "英国",
+            "法国": "法国", "france": "法国", "德国": "德国", "germany": "德国", "以色列": "以色列",
+            "israel": "以色列", "日本": "日本", "japan": "日本", "印度": "印度", "india": "印度"}
+_judge_cache: dict[tuple, dict] = {}
 
-    名称向量分不清「名字像但不是同一个」:BGE-M3 下 对空搜索雷达/对海搜索雷达 0.909、
-    甲干扰机/乙干扰机 0.787,反而高于真同一的 Iskander-M/伊斯坎德尔-M(0.592),任何阈值都两头错。
-    所以 ≥sim_low 只是候选,是否合并由 LLM 判断(llm_gate 开启时);gate 关闭时不经向量合并。
+
+def _veto(props_a: dict, codes_a: set, props_b: dict, codes_b: set) -> Optional[str]:
+    """第 ② 层:属性冲突否决。两边都有值且能比较时才否决;返回冲突原因或 None。
+
+    不比粒度:LLM 填的粒度经常不准,当硬否决会挡住真同一。
     """
-    return score >= settings.graphrag_resolve_sim_low and settings.graphrag_resolve_llm_gate
+    from .mesh.derived import _freq_interval
+    ca = _COUNTRY.get(normalize_name((props_a or {}).get("国别", "")))
+    cb = _COUNTRY.get(normalize_name((props_b or {}).get("国别", "")))
+    if ca and cb and ca != cb:
+        return f"国别不同({ca}/{cb})"
+    if codes_a and codes_b and not (codes_a & codes_b):
+        return f"型号编码不同({'/'.join(sorted(codes_a))} vs {'/'.join(sorted(codes_b))})"
+    fa = _freq_interval((props_a or {}).get("频率") or (props_a or {}).get("频段"))
+    fb = _freq_interval((props_b or {}).get("频率") or (props_b or {}).get("频段"))
+    if fa and fb and not (fa[0] <= fb[1] and fb[0] <= fa[1]):
+        return "频段不重合"
+    return None
 
 
-async def resolve_vector(milvus, embeddings, llm, name: str, entity_type: str,
-                         mergeable: Optional[set] = None) -> Optional[str]:
-    """匹配器②③:实体名向量相似度(类型作用域)只找候选,LLM 判断同一才合并。
+async def _judge(llm, a: tuple, b: tuple, entity_type: str) -> dict:
+    """第 ③ 层:LLM 判断是否同一(带属性),按名称对缓存,同一对只判一次方向。"""
+    key = (entity_type, a[0], b[0])
+    if key not in _judge_cache:
+        _judge_cache[key] = await asyncio.to_thread(llm.judge_entity_detail, a[0], a[1], b[0], b[1], entity_type)
+    return _judge_cache[key]
 
-    mergeable=None 表示不限制(向后兼容);传入可向量化类型集合时,集合外的类型直接跳过
-    (参数值/枚举类实体不走向量层,只走确定性)。
+
+async def resolve_vector(session, milvus, embeddings, llm, name: str, entity_type: str,
+                         mergeable: Optional[set] = None, properties: Optional[dict] = None,
+                         parent_id: Optional[str] = None, self_id: Optional[str] = None,
+                         record_suspect: bool = True) -> Optional[str]:
+    """第 ②③④ 层:向量只找候选 → 属性冲突否决 → LLM 判断(交换顺序问两次,都判同一且置信度够才合并)
+    → 判不了的不合并,记一条「疑似同一」待审(仅审计,不改图)。
+
+    名称向量分不清「名字像但不是同一个」:BGE-M3 下 对空搜索雷达/对海搜索雷达 0.909,
+    高于真同一的 Iskander-M/伊斯坎德尔-M 0.592,所以分数只用来找候选。llm_gate 关闭时不经向量合并。
+    mergeable=None 表示不限制;集合外的类型(参数值/枚举类)只走确定性。
     """
     if not settings.graphrag_resolve_vector_enabled or milvus is None or embeddings is None:
         return None
+    if not settings.graphrag_resolve_llm_gate or llm is None:
+        return None
     if mergeable is not None and entity_type not in mergeable:
         return None
+    from .alias_evidence import entity_codes
     try:
         vec = await asyncio.to_thread(embeddings.embed_one, name)
         top = await milvus.search_entities(vec, entity_type, settings.graphrag_resolve_topk)
     except Exception:
         return None  # 向量层不可用 -> 静默降级为确定性
-    if not top:
-        return None
-    eid, cname, score = top[0]
-    if _vector_merge_ok(score) and llm is not None:
-        same = await asyncio.to_thread(llm.judge_same_entity, name, cname, entity_type)
-        if same:
+    props = dict(properties or {})
+    codes = entity_codes(name, entity_type, props, [])
+    cands = [t for t in top if t[2] >= settings.graphrag_resolve_sim_low and t[0] != self_id]
+    for eid, cname, score in cands[:settings.graphrag_resolve_judge_topk]:
+        rows = await db.select_where(session, EntityRegistryEntry, entity_id=eid)
+        crow = rows[0] if rows else {}
+        cprops = dict(crow.get("properties") or {})
+        ccodes = entity_codes(cname, entity_type, cprops, list(crow.get("aliases") or []))
+        if _veto(props, codes, cprops, ccodes):
+            continue
+        r1 = await _judge(llm, (name, props), (cname, cprops), entity_type)
+        r2 = await _judge(llm, (cname, cprops), (name, props), entity_type)
+        conf = settings.graphrag_resolve_judge_confidence
+        ok = [bool(r.get("same")) and float(r.get("confidence") or 0) >= conf for r in (r1, r2)]
+        if all(ok):
             return eid
+        if record_suspect and parent_id and (r1.get("same") or r2.get("same")):
+            await db.insert(session, PendingExtraction, {
+                "parent_id": parent_id, "stage": "resolve",
+                "payload": {"name": name, "candidate": cname, "candidate_id": eid,
+                            "entity_type": entity_type, "score": round(float(score), 3),
+                            "judge": [r1, r2]},
+                "reason": f"疑似同一:「{name}」与「{cname}」两次判断不一致或置信度不足,未合并",
+                "attempts": 1,
+            })
     return None
 
 
@@ -138,8 +187,9 @@ async def align(session: AsyncSession, entities: list[Entity],
         resolved = await resolve_deterministic(session, e.name, e.entity_type,
                                                e.aliases, e.properties)
         if not resolved:
-            resolved = await resolve_vector(milvus, embeddings, llm, e.name, e.entity_type,
-                                            mergeable)
+            resolved = await resolve_vector(session, milvus, embeddings, llm, e.name, e.entity_type,
+                                            mergeable, properties=e.properties,
+                                            parent_id=e.source_parent_id, self_id=e.entity_id)
         if resolved and resolved != e.entity_id:
             remap[e.entity_id] = resolved
     if remap:
@@ -282,20 +332,11 @@ async def global_resolve(session: AsyncSession, neo4j, milvus, embeddings, llm,
                 continue
             if mergeable is not None and r["entity_type"] not in mergeable:
                 continue
-            try:
-                vec = await asyncio.to_thread(embeddings.embed_one, r["name"])
-                top = await milvus.search_entities(vec, r["entity_type"],
-                                                   settings.graphrag_resolve_topk)
-            except Exception:
-                continue
-            for (eid, cname, score) in top:
-                if eid == r["entity_id"]:
-                    continue
-                if _vector_merge_ok(score) and llm is not None:
-                    same = await asyncio.to_thread(llm.judge_same_entity,
-                                                   r["name"], cname, r["entity_type"])
-                    if same:
-                        dsu.union(r["entity_id"], eid)
+            eid = await resolve_vector(session, milvus, embeddings, llm, r["name"], r["entity_type"],
+                                       None, properties=r.get("properties"), self_id=r["entity_id"],
+                                       record_suspect=False)
+            if eid:
+                dsu.union(r["entity_id"], eid)
 
     # canonical = 组内最早(created_at, entity_id)
     remap: dict[str, str] = {}
