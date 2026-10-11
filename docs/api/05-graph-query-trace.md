@@ -13,13 +13,28 @@
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `query` | string | 是 | 自然语言问题 |
-| `kb_id` | UUID | 否 | 知识库 id（不传 = 全库） |
+| `kb_id` | UUID | 否 | 单个知识库 id（兼容旧前端） |
+| `kb_ids` | UUID[] | 否 | 勾选的知识库 id 列表；与 `kb_id` 合并去重。都不传 = 全库 |
 
 **请求示例**：
 
 ```json
 {"query": "2.4GHz 的调制方式是什么", "kb_id": "e5a34e83-5b8b-4ad1-bb2d-b91d1e730ca5"}
 ```
+
+多库勾选：
+
+```json
+{
+  "query": "2.4GHz 有哪些装备",
+  "kb_ids": [
+    "e5a34e83-5b8b-4ad1-bb2d-b91d1e730ca5",
+    "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+  ]
+}
+```
+
+知识库列表：`GET /knowledge-bases`（每条有 `id`）。只在勾选的库内做实体匹配、子块召回、图扩展，不串未勾选的库。
 
 **响应示例**：
 

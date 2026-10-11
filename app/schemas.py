@@ -213,6 +213,22 @@ class RuleRead(BaseModel):
 
 
 class GraphQueryRequest(BaseModel):
-    """在线查询请求:自然语言问题 + 知识库 id(可选,不传 = 全库)。"""
+    """在线查询请求。
+
+    勾选知识库:`kb_ids` 为选中的库 id 列表;也可只传旧字段 `kb_id` 单个。
+    两个都空 = 全库。多个 id 时只在这些库内检索,不串未勾选的库。
+    """
     query: str
     kb_id: Optional[UUID] = None
+    kb_ids: Optional[list[UUID]] = None
+
+    def scope_ids(self) -> list[str] | None:
+        ids: list[str] = []
+        seen: set[str] = set()
+        for x in list(self.kb_ids or []) + ([self.kb_id] if self.kb_id else []):
+            s = str(x)
+            if s and s not in seen:
+                seen.add(s)
+                ids.append(s)
+        return ids or None
+

@@ -132,4 +132,4 @@ async def search(query: str, milvus: AsyncMilvusClient, neo4j: Neo4jClient,
     answer = await generate_answer(query, hits, llm, trace_hook, graph_facts=graph_facts)
     return {"intent": intent, "cond": cond, "answer": answer, "hits": hits,
             "matched_entities": matched_ids, "expanded_entities": expanded,
-            "graph_facts": graph_facts}
+            "graph_facts": graph_facts, "kb_ids": kb_id if isinstance(kb_id, list) else ([str(kb_id)] if kb_id else None)}

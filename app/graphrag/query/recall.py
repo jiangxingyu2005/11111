@@ -157,8 +157,19 @@ def and_expr(*parts: str) -> str:
 
 
 def kb_expr(kb_id) -> str:
-    """kb_id 过滤子句(未传则空 = 全库)。"""
-    return f"{F_KB_ID} == '{kb_id}'" if kb_id else ""
+    """kb_id 或 id 列表 → Milvus 过滤;空 = 不按库滤。"""
+    if kb_id is None or kb_id == "" or kb_id == []:
+        return ""
+    if isinstance(kb_id, (list, tuple, set)):
+        ids = [str(x) for x in kb_id if x not in (None, "")]
+        if not ids:
+            return ""
+        if len(ids) == 1:
+            return f"{F_KB_ID} == '{ids[0]}'"
+        inner = ", ".join(f"'{x}'" for x in ids)
+        return f"{F_KB_ID} in [{inner}]"
+    return f"{F_KB_ID} == '{kb_id}'"
+
 
 
 def _enabled_expr() -> str:

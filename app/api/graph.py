@@ -134,7 +134,7 @@ async def graph_query(payload: GraphQueryRequest, db: AsyncSession = Depends(get
                 embeddings=EmbeddingClient(),
                 llm=LLMClient(),
                 relation_defs=relation_defs,
-                kb_id=payload.kb_id,
+                kb_id=payload.scope_ids(),
                 trace_hook=make_trace_hook(db),
             )
         await db.commit()
@@ -181,7 +181,8 @@ async def graph_query_stream(payload: GraphQueryRequest, db: AsyncSession = Depe
                 embeddings = EmbeddingClient()
                 llm = LLMClient()
 
-                entities = await neo4j.list_entities(kb_id=payload.kb_id)
+                scope = payload.scope_ids()
+                entities = await neo4j.list_entities(kb_id=scope)
                 matched_ids = match_entities(payload.query, entities)
                 matched_names = [e["name"] for e in entities if e["entity_id"] in matched_ids]
                 yield _sse("progress", {"step": "entity_match",
@@ -189,7 +190,7 @@ async def graph_query_stream(payload: GraphQueryRequest, db: AsyncSession = Depe
                                         "matched_ids": matched_ids})
 
                 rec = await dual_recall(payload.query, milvus, embeddings,
-                                        matched_ids, kb_id=payload.kb_id)
+                                        matched_ids, kb_id=scope)
                 yield _sse("progress", {"step": "recall",
                                         "route_a": len(rec["a"]),
                                         "route_b": len(rec["b"])})
@@ -200,10 +201,10 @@ async def graph_query_stream(payload: GraphQueryRequest, db: AsyncSession = Depe
                 expanded = []
                 graph_facts = []
                 if intent == "graph" and matched_ids:
-                    expanded = await expand(neo4j, matched_ids, kb_id=payload.kb_id)
+                    expanded = await expand(neo4j, matched_ids, kb_id=scope)
                     id2name = {e["entity_id"]: e["name"] for e in entities}
                     graph_facts = await query_router.collect_graph_facts(
-                        neo4j, matched_ids, id2name, kb_id=payload.kb_id, expanded=expanded)
+                        neo4j, matched_ids, id2name, kb_id=scope, expanded=expanded)
                     yield _sse("progress", {"step": "graph_expand",
                                             "expanded": len(expanded),
                                             "facts": graph_facts})

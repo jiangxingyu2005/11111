@@ -221,9 +221,10 @@ class Neo4jClient:
         if entity_type:
             clauses.append("e.entity_type = $entity_type")
             params["entity_type"] = entity_type
-        if kb_id:
-            clauses.append("EXISTS { MATCH (e)-[:BINDS]->(s:Segment {kb_id: $kb_id}) }")
-            params["kb_id"] = str(kb_id)
+        kb_ids = self._as_kb_ids(kb_id)
+        if kb_ids:
+            clauses.append("EXISTS { MATCH (e)-[:BINDS]->(s:Segment) WHERE s.kb_id IN $kb_ids }")
+            params["kb_ids"] = kb_ids
         if clauses:
             cypher += " WHERE " + " AND ".join(clauses)
         cypher += (" RETURN e.entity_id AS entity_id, e.name AS name, "
@@ -471,13 +472,32 @@ class Neo4jClient:
             head=head_entity_id, tail=tail_entity_id)
 
     @staticmethod
+    def _as_kb_ids(kb_id) -> list[str] | None:
+        """kb_id 或 kb_id 列表 → 去重后的字符串列表;空表示不按库过滤。"""
+        if kb_id is None or kb_id == "" or kb_id == []:
+            return None
+        if isinstance(kb_id, (list, tuple, set)):
+            out: list[str] = []
+            seen: set[str] = set()
+            for x in kb_id:
+                if x in (None, ""):
+                    continue
+                s = str(x)
+                if s not in seen:
+                    seen.add(s)
+                    out.append(s)
+            return out or None
+        return [str(kb_id)]
+
+    @staticmethod
     def _edge_in_kb(r: str, x: str, y: str) -> str:
-        """关系边是否属于 $kb_id:有来源分段的看来源分段所属库;
-        无来源的(派生边/手工边)要求两端实体都在该库的分段里出现过。"""
+        """关系边是否属于 $kb_ids:有来源分段的看来源分段所属库;
+        无来源的(派生边/手工边)要求两端实体都在这些库的分段里出现过。"""
         return (f"CASE WHEN {r}.source_parent_id IS NOT NULL "
-                f"THEN EXISTS {{ MATCH (src:Segment {{parent_id: {r}.source_parent_id}}) WHERE src.kb_id = $kb_id }} "
-                f"ELSE EXISTS {{ MATCH ({x})-[:BINDS]->(s1:Segment) WHERE s1.kb_id = $kb_id }} "
-                f"AND EXISTS {{ MATCH ({y})-[:BINDS]->(s2:Segment) WHERE s2.kb_id = $kb_id }} END")
+                f"THEN EXISTS {{ MATCH (src:Segment {{parent_id: {r}.source_parent_id}}) WHERE src.kb_id IN $kb_ids }} "
+                f"ELSE EXISTS {{ MATCH ({x})-[:BINDS]->(s1:Segment) WHERE s1.kb_id IN $kb_ids }} "
+                f"AND EXISTS {{ MATCH ({y})-[:BINDS]->(s2:Segment) WHERE s2.kb_id IN $kb_ids }} END")
+
 
     async def entity_relations(self, entity_id: str, limit: Optional[int] = None,
                                kb_id=None) -> list[dict]:
@@ -494,15 +514,14 @@ class Neo4jClient:
                 "ORDER BY derived, confidence DESC")
         if limit is not None:
             tail += " LIMIT $limit"
-        # kb_id:实体全局共享,同一实体在别的库里的关系边不能作为本库的事实
-        kb = str(kb_id) if kb_id else None
-        scope = f" AND {self._edge_in_kb('r', 'a', 'b')}" if kb else ""
+        kb_ids = self._as_kb_ids(kb_id)
+        scope = f" AND {self._edge_in_kb('r', 'a', 'b')}" if kb_ids else ""
         out = await self.run(
             "MATCH (a:Entity {entity_id: $id})-[r]->(b:Entity) WHERE type(r) <> 'BINDS'" + scope
-            + tail.format(dir="out"), id=entity_id, limit=limit, kb_id=kb)
+            + tail.format(dir="out"), id=entity_id, limit=limit, kb_ids=kb_ids)
         inn = await self.run(
             "MATCH (b:Entity)-[r]->(a:Entity {entity_id: $id}) WHERE type(r) <> 'BINDS'" + scope
-            + tail.format(dir="in"), id=entity_id, limit=limit, kb_id=kb)
+            + tail.format(dir="in"), id=entity_id, limit=limit, kb_ids=kb_ids)
         rows = sorted(out + inn, key=lambda r: (bool(r.get("derived")), -float(r.get("confidence") or 0.0)))
         return rows[:limit] if limit is not None else rows
 
@@ -515,7 +534,8 @@ class Neo4jClient:
 
         每个新到达节点只留一条来路(置信度最高),供回溯关系链;按置信度取前 cap 个。
         """
-        scope = f" AND {self._edge_in_kb('r', 'x', 'y')}" if kb else ""
+        kb_ids = self._as_kb_ids(kb)
+        scope = f" AND {self._edge_in_kb('r', 'x', 'y')}" if kb_ids else ""
         return await self.run(
             "MATCH (x:Entity)-[r]-(y:Entity) WHERE elementId(x) IN $frontier "
             "AND type(r) <> 'BINDS' AND NOT coalesce(r.derived, false) "
@@ -527,18 +547,19 @@ class Neo4jClient:
             "dir: CASE WHEN startNode(r) = x THEN 'out' ELSE 'in' END, conf: conf})[0] AS via "
             "RETURN elementId(y) AS nid, y.entity_id AS entity_id, y.name AS name, "
             "y.entity_type AS entity_type, via ORDER BY via.conf DESC, nid LIMIT $cap",
-            frontier=frontier, visited=visited, cap=self._EXPAND_FRONTIER_CAP, kb_id=kb)
+            frontier=frontier, visited=visited, cap=self._EXPAND_FRONTIER_CAP, kb_ids=kb_ids)
 
     async def _cooccur_step(self, frontier: list, visited: list, kb) -> list[dict]:
         """一跳同段共现扩展:与边界实体出现在同一(本库)分段里的实体,按共享分段数排序。"""
-        scope = " AND s.kb_id = $kb_id" if kb else ""
+        kb_ids = self._as_kb_ids(kb)
+        scope = " AND s.kb_id IN $kb_ids" if kb_ids else ""
         return await self.run(
             "MATCH (x:Entity)-[:BINDS]->(s:Segment)<-[:BINDS]-(y:Entity) "
             "WHERE elementId(x) IN $frontier AND NOT elementId(y) IN $visited" + scope + " "
             "WITH y, count(DISTINCT s) AS shared "
             "RETURN elementId(y) AS nid, y.entity_id AS entity_id, y.name AS name, "
             "y.entity_type AS entity_type, shared ORDER BY shared DESC, nid LIMIT $cap",
-            frontier=frontier, visited=visited, cap=self._EXPAND_FRONTIER_CAP, kb_id=kb)
+            frontier=frontier, visited=visited, cap=self._EXPAND_FRONTIER_CAP, kb_ids=kb_ids)
 
     async def _bfs(self, seeds: list, depth: int, kb, cooccur: bool) -> dict:
         """逐跳 BFS,返回 {nid: {entity_id, name, entity_type, hops, via, shared}}。
@@ -600,7 +621,7 @@ class Neo4jClient:
         """
         if not entity_ids:
             return []
-        kb = str(kb_id) if kb_id else None
+        kb = self._as_kb_ids(kb_id)
         depth = int(depth)
         seed_rows = await self.run(
             "MATCH (a:Entity) WHERE a.entity_id IN $ids RETURN elementId(a) AS nid, a.name AS name",
