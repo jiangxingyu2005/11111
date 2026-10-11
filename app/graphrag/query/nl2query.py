@@ -9,8 +9,11 @@ import re
 
 # 调制方式关键词 → 枚举值(封闭词表,可扩展)
 _MODULATION_MAP: list[tuple[tuple[str, ...], str]] = [
-    (("跳频", "fh"), "FSK"),
-    (("相移键控", "psk", "bpsk", "qpsk", "8psk"), "PSK"),
+    (("qpsk",), "QPSK"),
+    (("bpsk",), "BPSK"),
+    (("8psk",), "8PSK"),
+    (("跳频", "fhss"), "跳频"),
+    (("相移键控", "psk"), "PSK"),
     (("正交幅度", "qam"), "QAM"),
     (("线性调频", "lfm"), "LFM"),
     (("调频", "fm"), "FM"),

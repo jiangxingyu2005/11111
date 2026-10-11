@@ -14,7 +14,9 @@ from typing import Optional
 from ..config import get
 from ..embeddings import EmbeddingClient
 from ..ids import normalize_name
+from ..mesh.derived import _freq_interval
 from ..milvus_client import F_ENABLED, F_KB_ID, F_KG_ENTITY_IDS, AsyncMilvusClient
+from .nl2query import nl2query
 
 # 型号常写成「编号 + 名称」(MGM-140 ATACMS / 9K720 Iskander-M),用户只说其中一段
 _SPLIT_RE = re.compile(r"[\s/、,，;；()（）]+")
@@ -42,20 +44,35 @@ def _match_keys(names: list[str]) -> set[str]:
 
 
 def match_entities(query: str, entities: list[dict]) -> list[str]:
-    """把查询词匹配到实体(名称/别名/型号片段命中,大小写/全角不敏感)。返回 entity_id 列表。
+    """名称/别名/型号子串命中,或问句中的频率/频段/调制与实体属性重合。
 
-    入库时实体 name 已经 normalize_name 小写化,查询侧同样归一化后再做子串匹配,
-    否则「2.4GHz」永远匹配不到实体「2.4ghz」。别名里的原始型号写法会切成片段,
-    让「ATACMS导弹」能命中实体「MGM-140 ATACMS」。连字符在匹配时折叠,NH-90 能对上 NH90。
+    nl2query 抠出的 freq_band、modulation_type 用在属性比对上:
+    「2.4GHz 有哪些装备」能同时命中带该频率的雷达和发射车。
     """
     q = _fold(normalize_name(query))
+    cond = nl2query(query)
+    q_freq = _freq_interval(cond.get("freq_band") or query)
+    q_mod = _fold(normalize_name(cond.get("modulation_type") or ""))
     hits = []
     for e in entities:
+        props = _props(e.get("properties"))
         names = [e.get("name", "")] + list(e.get("aliases") or [])
-        model = _props(e.get("properties")).get("型号")
+        model = props.get("型号")
         if model:
             names.append(str(model))
         if any(_fold(k) in q for k in _match_keys(names)):
+            hits.append(e["entity_id"])
+            continue
+        ef = _freq_interval(props.get("频率") or props.get("频段"))
+        if q_freq and ef and q_freq[0] <= ef[1] and ef[0] <= q_freq[1]:
+            hits.append(e["entity_id"])
+            continue
+        band = _fold(normalize_name(str(props.get("频段") or "")))
+        if band and len(band) >= 2 and band in q:
+            hits.append(e["entity_id"])
+            continue
+        mod = _fold(normalize_name(str(props.get("调制方式") or "")))
+        if mod and len(mod) >= 2 and (mod in q or (q_mod and q_mod in mod)):
             hits.append(e["entity_id"])
     return hits
 
