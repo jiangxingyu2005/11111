@@ -1,7 +1,9 @@
-# qingxi 全栈本地 Docker
-# 启动: docker compose up -d --build
-# 应用: http://127.0.0.1:8001   检索: http://127.0.0.1:8100   MinerU: http://127.0.0.1:8008
+# qingxi 全栈本地 Docker（配置以 Nacos 为唯一事实源）
+# 启动: docker compose up -d --build（首次会先起 nacos -> 播种 nacos-seed -> 再起应用）
+# 应用(qingxi): http://127.0.0.1:8003   检索: http://127.0.0.1:8100
+# Nacos 控制台: http://127.0.0.1:8848/nacos   model_stub(embed/rerank): http://127.0.0.1:8010   MinerU: http://127.0.0.1:8008
 # 对象存储用 SeaweedFS（MinIO 社区版已停发）；Milvus 宿主机端口 18530（Windows 保留了 19530）
+# 注意：若本机已跑独立 nacos 容器(占用 8848/9848)，先停掉再 compose up，否则端口冲突。
 
 services:
   postgres:
@@ -119,6 +121,64 @@ services:
       start_period: 180s
       retries: 30
 
+  nacos:
+    image: docker.m.daocloud.io/nacos/nacos-server:v2.3.2
+    container_name: qingxi-nacos
+    environment:
+      MODE: standalone
+      NACOS_AUTH_ENABLE: "false"
+      PREFER_HOST_MODE: ip
+    ports:
+      - "8848:8848"
+      - "9848:9848"
+    volumes:
+      - qingxi-nacos:/home/nacos/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8848/nacos/v1/console/health/readiness || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 12
+
+  # 一次性播种：把 deploy/nacos-seed/ 里的 Docker 版配置发布进 Nacos，跑完即退出。
+  # 复用 qingxi 镜像（内含 Python + common/nacos_client + scripts/seed_nacos.py）。
+  nacos-seed:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.qingxi
+    image: qingxi-app:local
+    container_name: qingxi-nacos-seed
+    command: ["python", "scripts/seed_nacos.py", "--server", "http://nacos:8848", "--seed-dir", "/nacos-seed"]
+    volumes:
+      - ./deploy/nacos-seed:/nacos-seed:ro
+    depends_on:
+      nacos:
+        condition: service_healthy
+    restart: "no"
+
+  model_stub:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.model_stub
+    image: qingxi-model-stub:local
+    container_name: qingxi-model-stub
+    environment:
+      EMBED_BACKEND: bge_m3
+      EMBED_MODEL: /app/models/bge-m3
+      RERANK_BACKEND: bge
+      RERANK_MODEL: /app/models/bge-reranker-v2-m3
+    ports:
+      - "8010:8010"
+    depends_on:
+      nacos-seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8010/healthz"]
+      interval: 20s
+      timeout: 8s
+      start_period: 120s
+      retries: 20
+
   qingxi:
     build:
       context: .
@@ -127,7 +187,9 @@ services:
     container_name: qingxi-app
     env_file:
       - .env
-      - deploy/qingxi.docker.env
+    environment:
+      NACOS_ENABLED: "true"
+      NACOS_SERVER_ADDR: http://nacos:8848
     ports:
       - "8003:8001"
     volumes:
@@ -150,6 +212,8 @@ services:
         condition: service_healthy
       mineru:
         condition: service_started
+      nacos-seed:
+        condition: service_completed_successfully
 
   retrieval:
     build:
@@ -158,29 +222,16 @@ services:
     image: qingxi-retrieval:local
     container_name: qingxi-retrieval
     environment:
-      NACOS_ENABLED: "false"
-      RETRIEVAL_BACKEND: fake
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DATABASE: postgres
-      MILVUS_HOST: milvus
-      MILVUS_PORT: 19530
-      NEO4J_URI: bolt://neo4j:7687
-      NEO4J_USER: neo4j
-      NEO4J_PASSWORD: testpassword
-      RETRIEVAL_EMBED_MODE: remote
-      RETRIEVAL_EMBED_URL: ""
-      GRAPHRAG_LLM_BASE_URL: ""
-      GRAPHRAG_LLM_MODEL: ""
-      RETRIEVAL_RERANK_SERVICE_URL: ""
-      EMBED_BACKEND: hash
-      RERANK_BACKEND: hash
-      LLM_BACKEND: echo
+      NACOS_ENABLED: "true"
+      NACOS_SERVER_ADDR: http://nacos:8848
     ports:
       - "8100:8100"
     working_dir: /app/retrieval
+    depends_on:
+      nacos-seed:
+        condition: service_completed_successfully
+      model_stub:
+        condition: service_healthy
 
 volumes:
   qingxi-pgdata:
@@ -188,4 +239,5 @@ volumes:
   qingxi-minio:
   qingxi-milvus:
   qingxi-neo4j:
+  qingxi-nacos:
   mineru-models:

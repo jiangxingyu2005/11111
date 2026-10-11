@@ -535,3 +535,9 @@ async def health() -> HealthResponse:
         return HealthResponse(status="ok", mineru=MinerUHealth(ok=True, detail=json.dumps(detail, ensure_ascii=False)))
     except Exception as e:
         return HealthResponse(status="degraded", mineru=MinerUHealth(ok=False, detail=str(e)))
+
+
+@router.get("/healthz")
+async def healthz() -> dict:
+    """存活探针（与 retrieval/model_stub 的 /healthz 对齐，纯进程存活，不查 mineru）。"""
+    return {"status": "ok", "service": "qingxi"}

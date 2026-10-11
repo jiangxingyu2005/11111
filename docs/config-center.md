@@ -7,9 +7,10 @@
 （listener 长轮询监听到变更即时生效，无需重启）。
 
 - 客户端：自研 `common/nacos_client.py`（`httpx`，零新依赖，不引 `nacos-sdk-python`）。
-- Nacos 服务：独立容器（老地方 `C:\Users\A\Desktop\docker\nacos\docker-compose.yml`，
+- Nacos 服务：开发机跑独立容器（老地方 `C:\Users\A\Desktop\docker\nacos\docker-compose.yml`，
   `nacos/nacos-server:v2.3.2`，standalone，`NACOS_AUTH_ENABLE=false`），端口 8848（HTTP 配置 API）
-  / 9848（gRPC）。
+  / 9848（gRPC）。**打包交付**则用根 `docker-compose.yml` 自带的 `nacos` + `nacos-seed` 服务：
+  先起 nacos → 一次性播种 → 再起各应用，目标机无需预置 Nacos。
 - 命名空间：public（空 tenant）；group：`DEFAULT_GROUP`。
 - **listener 契约**（踩过坑）：`Listening-Configs` 是 **query/form 参数**（不是 header），只有
   `Long-Pulling-Timeout` 走 header；变更响应体是 **URL 编码** 的 `dataId\x02group(\x01…)*`
@@ -74,6 +75,16 @@ python scripts/nacos_seed.py                    # 发布 5 个 dataId（幂等�
 
 控制台 `http://127.0.0.1:8848/nacos` 可见 5 条配置。播种脚本会剥 `NACOS_*` 键与行内 ` # ` 注释
 （只剥「空白后跟 #」，不剥口令/URL 里的 `#`）。
+
+两个播种脚本，按场景选一个：
+
+| 脚本 | 布局 | 场景 |
+|---|---|---|
+| `scripts/nacos_seed.py` | monorepo（读根 `.env` + `retrieval/.env` + `retrieval/config/*.yaml`） | 开发机，配置还在本地文件里 |
+| `scripts/seed_nacos.py --server … --seed-dir …` | 扁平目录（`<seed-dir>/<name>.env|yaml` → dataId） | 打包/离线：读 `deploy/nacos-seed/`，compose 的 `nacos-seed` 服务即用它 |
+
+`deploy/nacos-seed/` 里的文件已把 host 换成 **Docker 内网名**（`postgres`/`milvus`/`neo4j`/
+`model_stub`/`minio`/`mineru`），因为 Nacos 值会覆盖进程 env（见下），不能沿用本机 `127.0.0.1`。
 
 ## 7. 启用与回退
 

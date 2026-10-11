@@ -18,6 +18,8 @@ retrieval/data/eval/
 # —— git / 缓存 / 文档 ——
 .git/
 .gitignore
+.env
+**/.env
 __pycache__/
 **/__pycache__/
 *.pyc

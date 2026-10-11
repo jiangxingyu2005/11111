@@ -17,9 +17,12 @@ RUN pip install -U pip -i https://pypi.tuna.tsinghua.edu.cn/simple \
 COPY common /app/common
 COPY retrieval /app/retrieval
 
+# Nacos bootstrap 指向 compose 内网 nacos 服务（覆盖仓库 retrieval/.env 的 127.0.0.1）
+COPY deploy/retrieval.docker.env /app/retrieval/.env
+
 EXPOSE 8100
 
 HEALTHCHECK --interval=20s --timeout=5s --start-period=30s --retries=10 \
   CMD curl -fsS http://127.0.0.1:8100/healthz || exit 1
 
-CMD ["sh", "-c", "python scripts/gen_seed.py && exec uvicorn app.main:app --host 0.0.0.0 --port 8100"]
+CMD ["sh", "-c", "python scripts/gen_seed.py --embed service --embed-url http://model_stub:8010/embed && exec uvicorn app.main:app --host 0.0.0.0 --port 8100"]

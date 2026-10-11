@@ -17,7 +17,7 @@
   - 模型身份的唯一登记处是 config/retrieval.yaml:models；本文件只消费，不另立门户
   - 自省接口一律脱敏：api_key 与自定义头的值绝不出现在响应里
   - 拿不到 sparse 就返回 null，绝不伪造；嵌入维度与声明不符直接报错
-启动：python services/model_stub.py --port 8001
+启动：python services/model_stub.py --port 8010
 """
 from __future__ import annotations
 
@@ -389,7 +389,7 @@ async def list_models():
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", type=int, default=8001)
+    ap.add_argument("--port", type=int, default=8010)
     ap.add_argument("--host", default="127.0.0.1")
     args = ap.parse_args()
     ep, rp, lp = _get()

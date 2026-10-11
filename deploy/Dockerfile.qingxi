@@ -19,6 +19,7 @@ RUN pip install -U pip -i https://pypi.tuna.tsinghua.edu.cn/simple \
 
 COPY app /app/app
 COPY common /app/common
+COPY scripts/seed_nacos.py /app/scripts/seed_nacos.py
 
 EXPOSE 8001
 
