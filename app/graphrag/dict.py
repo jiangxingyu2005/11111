@@ -5,7 +5,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import ExtractionDict
+from ..models import EntityAlias, ExtractionDict
 
 
 async def load_entity_defs(session: AsyncSession) -> list[dict]:
@@ -84,3 +84,15 @@ async def load_relations(session: AsyncSession) -> dict:
         for r in rows
     ]
     return {"relation_types": relation_types}
+
+
+async def load_alias_library(session: AsyncSession) -> list[dict]:
+    """别名库:代号 → 类别字典实体类型(实体抽取动态提示词用,每次现查、无缓存)。
+
+    返回 [{"alias", "entity_type"}, ...],按创建顺序排序;抽取侧只注入 entity_type
+    在当前实体类型集内的代号,避免提示 schema 里没有的类型。
+    """
+    stmt = select(EntityAlias).order_by(EntityAlias.created_at)
+    res = await session.execute(stmt)
+    rows = res.scalars().all()
+    return [{"alias": r.alias, "entity_type": r.entity_type} for r in rows]

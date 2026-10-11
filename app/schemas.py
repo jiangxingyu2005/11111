@@ -174,6 +174,28 @@ class ExtractionDictRead(BaseModel):
     updated_at: datetime
 
 
+class EntityAliasCreate(BaseModel):
+    """新建别名库条目(代号/别名 → 类别字典实体类型)。"""
+    alias: str
+    entity_type: str
+
+
+class EntityAliasRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    alias: str
+    entity_type: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class EntityAliasUpdate(BaseModel):
+    """更新别名库条目(仅传要改的字段)。"""
+    alias: Optional[str] = None
+    entity_type: Optional[str] = None
+
+
 class RuleCreate(BaseModel):
     """新建预设推理规则（需求(7)：检索后触发预设推理规则）。"""
     id: str                     # 语义主键，形如 "R_001"（调用方显式指定，非 UUID）

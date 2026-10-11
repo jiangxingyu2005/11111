@@ -1,6 +1,7 @@
 """ORM 模型包:所有 SQLAlchemy 模型都在这里定义并导出。"""
 
 from .document import Document
+from .entity_alias import EntityAlias
 from .extraction_dict import ExtractionDict
 from .graphrag import (
     ChunkRelation,
@@ -18,6 +19,7 @@ from .rules import Rule
 __all__ = [
     "Document",
     "KnowledgeBase",
+    "EntityAlias",
     "ExtractionDict",
     "Rule",
     "ParentDocument",

@@ -13,8 +13,11 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import ExtractionDict
+from ..models import EntityAlias, ExtractionDict
 from ..schemas import (
+    EntityAliasCreate,
+    EntityAliasRead,
+    EntityAliasUpdate,
     ExtractionDictCreate,
     ExtractionDictRead,
     ExtractionDictUpdate,
@@ -106,6 +109,103 @@ async def delete_dict(dict_id: UUID, db: AsyncSession = Depends(get_db)) -> None
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="字典条目不存在")
     row.deleted_at = func.now()
     row.updated_at = func.now()
+    await db.commit()
+
+
+@router.post("/alias", response_model=EntityAliasRead, status_code=status.HTTP_201_CREATED)
+async def create_alias(payload: EntityAliasCreate, db: AsyncSession = Depends(get_db)) -> EntityAliasRead:
+    """新增别名库条目(代号 → 类别字典实体类型)。"""
+    from ..graphrag.dict import load_entity_defs
+
+    entity_defs = await load_entity_defs(db)
+    valid_types = {d["name"] for d in entity_defs}
+    if payload.entity_type not in valid_types:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"entity_type 必须是当前启用的实体类型之一 {sorted(valid_types)}，收到: {payload.entity_type!r}",
+        )
+    exists = await db.scalar(select(EntityAlias).where(EntityAlias.alias == payload.alias))
+    if exists is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"别名 {payload.alias!r} 已存在(对应类型 {exists.entity_type!r})",
+        )
+    row = EntityAlias(**payload.model_dump())
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return row
+
+
+@router.get("/alias", response_model=list[EntityAliasRead])
+async def list_alias(
+    db: AsyncSession = Depends(get_db),
+    entity_type: str | None = Query(None, description="按类别过滤(如 辐射源)"),
+) -> list[EntityAliasRead]:
+    """别名库列表,可按实体类型过滤。"""
+    stmt = select(EntityAlias)
+    if entity_type is not None:
+        stmt = stmt.where(EntityAlias.entity_type == entity_type)
+    stmt = stmt.order_by(EntityAlias.created_at)
+    return list(await db.scalars(stmt))
+
+
+@router.get("/alias/{alias_id}", response_model=EntityAliasRead)
+async def get_alias(alias_id: UUID, db: AsyncSession = Depends(get_db)) -> EntityAliasRead:
+    """查询单条别名库条目。"""
+    row = await db.scalar(select(EntityAlias).where(EntityAlias.id == alias_id))
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="别名条目不存在")
+    return row
+
+
+@router.put("/alias/{alias_id}", response_model=EntityAliasRead)
+async def update_alias(alias_id: UUID, payload: EntityAliasUpdate, db: AsyncSession = Depends(get_db)) -> EntityAliasRead:
+    """更新别名库条目(仅传要改的字段)。"""
+    from ..graphrag.dict import load_entity_defs
+
+    row = await db.scalar(select(EntityAlias).where(EntityAlias.id == alias_id))
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="别名条目不存在")
+
+    data = payload.model_dump(exclude_unset=True)
+    new_alias = data.get("alias")
+    new_type = data.get("entity_type")
+
+    if new_alias is not None and new_alias != row.alias:
+        dup = await db.scalar(select(EntityAlias).where(EntityAlias.alias == new_alias))
+        if dup is not None and dup.id != row.id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"别名 {new_alias!r} 已存在(对应类型 {dup.entity_type!r})",
+            )
+
+    if new_type is not None and new_type != row.entity_type:
+        entity_defs = await load_entity_defs(db)
+        valid_types = {d["name"] for d in entity_defs}
+        if new_type not in valid_types:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"entity_type 必须是当前启用的实体类型之一 {sorted(valid_types)}，收到: {new_type!r}",
+            )
+
+    if new_alias is not None:
+        row.alias = new_alias
+    if new_type is not None:
+        row.entity_type = new_type
+    row.updated_at = func.now()
+    await db.commit()
+    await db.refresh(row)
+    return row
+
+
+@router.delete("/alias/{alias_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_alias(alias_id: UUID, db: AsyncSession = Depends(get_db)) -> None:
+    """删除别名库条目(物理删除)。"""
+    row = await db.scalar(select(EntityAlias).where(EntityAlias.id == alias_id))
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="别名条目不存在")
+    await db.delete(row)
     await db.commit()
 
 

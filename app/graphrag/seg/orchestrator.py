@@ -15,7 +15,7 @@ from ...models import ChunkRelation, ParentDocument
 from .. import db, chunk, resolve
 from ..binding import bind_back, build_binds
 from ..config import get
-from ..dict import load_entity_defs, load_relations
+from ..dict import load_alias_library, load_entity_defs, load_relations
 from ..embeddings import EmbeddingClient
 from ..extract_entities import extract as extract_entities
 from ..extract_relations import extract as extract_relations
@@ -90,7 +90,8 @@ async def edit_segment(session: AsyncSession, milvus: AsyncMilvusClient,
     entity_defs = await load_entity_defs(session)
     entity_types = [d["name"] for d in entity_defs]
     relation_defs = await load_relations(session)
-    entities = await extract_entities(session, llm, [parent], entity_types, entity_defs)
+    alias_library = await load_alias_library(session)
+    entities = await extract_entities(session, llm, [parent], entity_types, entity_defs, alias_library)
     relations, _ = await extract_relations(session, entities, llm, [parent], relation_defs)
     # ④.5 跨文档消歧:对齐到全局注册表 + 写回(编辑重抽复用既有实体)
     entities, relations, _remap = await resolve.align(session, entities, relations,
