@@ -16,7 +16,7 @@ from ..embeddings import EmbeddingClient
 from ..ids import normalize_name
 from ..mesh.derived import _freq_interval
 from ..milvus_client import F_ENABLED, F_KB_ID, F_KG_ENTITY_IDS, AsyncMilvusClient
-from .nl2query import nl2query
+from .nl2query import nl2query, parse_quantities
 
 # 型号常写成「编号 + 名称」(MGM-140 ATACMS / 9K720 Iskander-M),用户只说其中一段
 _SPLIT_RE = re.compile(r"[\s/、,，;；()（）]+")
@@ -43,16 +43,71 @@ def _match_keys(names: list[str]) -> set[str]:
     return {k for k in (keys | folded) if k}
 
 
-def match_entities(query: str, entities: list[dict]) -> list[str]:
-    """名称/别名/型号子串命中,或问句中的频率/频段/调制与实体属性重合。
+# 属性名里带这些字、值又没写单位时,按量纲族补全(射程 500 → 500km)
+_KEY_FAM = (
+    (("频率", "频段", "重频", "带宽"), "hz"),
+    (("射程", "探测", "航程", "半径", "距离"), "km"),
+    (("脉宽",), "s"),
+)
 
-    nl2query 抠出的 freq_band、modulation_type 用在属性比对上:
-    「2.4GHz 有哪些装备」能同时命中带该频率的雷达和发射车。
+
+def _qty_from_prop(key: str, val) -> list[tuple[float, float, str]]:
+    text = str(val or "")
+    found = parse_quantities(text)
+    if found:
+        return found
+    if not re.search(r"\d", text):
+        return []
+    fam = next((f for keys, f in _KEY_FAM if any(k in key for k in keys)), None)
+    if not fam:
+        return []
+    nums = re.findall(r"\d+(?:\.\d+)?", text)
+    if len(nums) >= 2:
+        lo, hi = float(nums[0]), float(nums[1])
+        return [(min(lo, hi), max(lo, hi), fam)]
+    if len(nums) == 1:
+        x = float(nums[0])
+        return [(x, x, fam)]
+    return []
+
+
+def _qty_overlap(query_qtys, prop_qtys) -> bool:
+    for a in query_qtys:
+        for b in prop_qtys:
+            if a[2] == b[2] and a[0] <= b[1] and b[0] <= a[1]:
+                return True
+    return False
+
+
+def _qty_key_ok(query: str, key: str) -> bool:
+    """问句点了字段名则只比对应属性,避免 500km 打到探测距离。"""
+    if "射程" in query:
+        return "射程" in key
+    if "探测" in query or "作用距离" in query:
+        return "探测" in key or "作用距离" in key
+    if "航程" in query:
+        return "航程" in key
+    if "作战半径" in query or "半径" in query:
+        return "半径" in key
+    if any(x in query.lower() for x in ("ghz", "mhz", "khz", "频率")):
+        return any(k in key for k in ("频率", "频段", "重频", "带宽"))
+    return True
+
+
+
+def match_entities(query: str, entities: list[dict]) -> list[str]:
+    """名称/别名/型号子串命中,或问句中的数量/频段/调制与实体属性重合。
+
+    「2.4GHz 有哪些装备」「射程 500km 是哪型导弹」走属性区间比对(同量纲才比),
+    后续新数字字段只要写进 properties 且带单位(或属性名能推断单位)即可回推,不必再改匹配。
     """
     q = _fold(normalize_name(query))
     cond = nl2query(query)
     q_freq = _freq_interval(cond.get("freq_band") or query)
     q_mod = _fold(normalize_name(cond.get("modulation_type") or ""))
+    q_qtys = list(cond.get("quantities") or [])
+    if q_freq:
+        q_qtys.append((q_freq[0], q_freq[1], "hz"))
     hits = []
     for e in entities:
         props = _props(e.get("properties"))
@@ -63,10 +118,19 @@ def match_entities(query: str, entities: list[dict]) -> list[str]:
         if any(_fold(k) in q for k in _match_keys(names)):
             hits.append(e["entity_id"])
             continue
-        ef = _freq_interval(props.get("频率") or props.get("频段"))
-        if q_freq and ef and q_freq[0] <= ef[1] and ef[0] <= q_freq[1]:
-            hits.append(e["entity_id"])
-            continue
+        if q_qtys:
+            matched_qty = False
+            for k, v in props.items():
+                if k in ("型号", "origin", "role", "粒度", "国别"):
+                    continue
+                if not _qty_key_ok(query, str(k)):
+                    continue
+                if _qty_overlap(q_qtys, _qty_from_prop(str(k), v)):
+                    hits.append(e["entity_id"])
+                    matched_qty = True
+                    break
+            if matched_qty:
+                continue
         band = _fold(normalize_name(str(props.get("频段") or "")))
         if band and len(band) >= 2 and band in q:
             hits.append(e["entity_id"])
