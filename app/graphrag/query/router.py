@@ -109,7 +109,7 @@ async def search(query: str, milvus: AsyncMilvusClient, neo4j: Neo4jClient,
     intent = route(query, relation_defs)
     cond = nl2query(query)
 
-    entities = await neo4j.list_entities()
+    entities = await neo4j.list_entities(kb_id=kb_id)
     matched_ids = match_entities(query, entities)
 
     rec = await dual_recall(query, milvus, embeddings, matched_ids, kb_id=kb_id)

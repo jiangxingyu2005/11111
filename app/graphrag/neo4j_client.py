@@ -205,8 +205,13 @@ class Neo4jClient:
 
     # ---- 查询 ----
     async def list_entities(self, name: Optional[str] = None,
-                            entity_type: Optional[str] = None) -> list[dict]:
-        """按名称(含别名)/类型查实体,供在线查询做实体匹配。实体全局共享、不分知识库。"""
+                            entity_type: Optional[str] = None,
+                            kb_id=None) -> list[dict]:
+        """按名称(含别名)/类型查实体,供在线查询做实体匹配。
+
+        传入 kb_id 时只返回 BINDS 到该库 Segment 的实体,避免问 A 库命中 B 库装备。
+        不传 kb_id 仍全图(兼容管理/对账)。
+        """
         cypher = "MATCH (e:Entity)"
         clauses: list[str] = []
         params: dict = {}
@@ -216,6 +221,9 @@ class Neo4jClient:
         if entity_type:
             clauses.append("e.entity_type = $entity_type")
             params["entity_type"] = entity_type
+        if kb_id:
+            clauses.append("EXISTS { MATCH (e)-[:BINDS]->(s:Segment {kb_id: $kb_id}) }")
+            params["kb_id"] = str(kb_id)
         if clauses:
             cypher += " WHERE " + " AND ".join(clauses)
         cypher += (" RETURN e.entity_id AS entity_id, e.name AS name, "

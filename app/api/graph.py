@@ -181,7 +181,7 @@ async def graph_query_stream(payload: GraphQueryRequest, db: AsyncSession = Depe
                 embeddings = EmbeddingClient()
                 llm = LLMClient()
 
-                entities = await neo4j.list_entities()
+                entities = await neo4j.list_entities(kb_id=payload.kb_id)
                 matched_ids = match_entities(payload.query, entities)
                 matched_names = [e["name"] for e in entities if e["entity_id"] in matched_ids]
                 yield _sse("progress", {"step": "entity_match",
