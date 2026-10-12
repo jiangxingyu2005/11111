@@ -6,6 +6,7 @@
 """
 
 import logging
+import math
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, status
@@ -57,6 +58,74 @@ def _build_scalars(result: dict, category: str) -> dict:
     return scalars
 
 
+def _fmt_hz(v):
+    """Hz -> 人类可读字符串(带单位);None/非数值/inf/nan 返回 None。"""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(f):
+        return None
+    if abs(f) >= 1e6:
+        return f"{f / 1e6:.4f} MHz"
+    if abs(f) >= 1e3:
+        return f"{f / 1e3:.4f} kHz"
+    return f"{f:.4f} Hz"
+
+
+def _fmt_db(v):
+    """dB 值 -> 字符串;None/非数值/inf/nan 返回 None。"""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(f):
+        return None
+    return f"{f:.2f} dB"
+
+
+def _build_param_lines(result: dict) -> list[str]:
+    """从 param_guess + raw_entry 组装中文信号参数行,供实体抽取填进 properties。
+
+    IQ 的实体属性 schema 要 频率/频段/调制方式/脉宽/重频/带宽(+采样率);而 describe_signal_features
+    只输出 26 个归一化统计特征(频率均值/光谱带宽等),名称与量纲都对不上,导致抽取节点属性为空。
+    这里把 analyze_iq 算出的真实参数(载频/带宽/符号速率)与 H5 元数据(采样率/符号速率)翻成
+    与 schema 同名的中文行,LLM 才能按 _PARAM_RULE 填进所属实体。
+    """
+    params = (result.get("param_guess") or {}).get("parameters") or {}
+    raw = result.get("raw_entry") or {}
+    snr = (result.get("snr") or {}).get("mean_snr")
+
+    lines: list[str] = []
+    mod = params.get("modulation") or raw.get("modulation")
+    if mod:
+        lines.append(f"  - 调制方式: {mod}")
+    carrier = _fmt_hz(params.get("carrier"))
+    if carrier:
+        lines.append(f"  - 载频: {carrier}")
+    bw = _fmt_hz(params.get("bandwidth"))
+    if bw:
+        lines.append(f"  - 带宽: {bw}")
+    # 符号速率优先取 H5 元数据(raw_entry),缺失退回 analyze_iq 估计值
+    symbol_rate = _fmt_hz(raw.get("symbol_rate_hz") or params.get("symbol_rate"))
+    if symbol_rate:
+        lines.append(f"  - 符号速率: {symbol_rate}")
+    sample_rate = _fmt_hz(raw.get("sample_rate_hz"))
+    if sample_rate:
+        lines.append(f"  - 采样率: {sample_rate}")
+    snr_s = _fmt_db(snr)
+    if snr_s:
+        lines.append(f"  - 信噪比: {snr_s}")
+    att = _fmt_db(result.get("attenuation_db"))
+    if att:
+        lines.append(f"  - 衰减: {att}")
+    return lines
+
+
 async def _load_doc_h5(doc_id: UUID):
     """查文档 + 取回原始 H5 字节;缺失抛 404。"""
     async with SessionLocal() as db:
@@ -98,7 +167,9 @@ async def ingest_iq(payload: IqIngestRequest) -> IqIngestResponse:
     # 4. md 追加类别 -> 正常入知识库/知识图谱(与其他文本一致)
     graph_summary = None
     if settings.graphrag_enabled:
-        md_with_category = f"{result['md']}\n\n类别:{category}"
+        param_lines = _build_param_lines(result)
+        param_block = ("\n\n【信号参数】\n" + "\n".join(param_lines)) if param_lines else ""
+        md_with_category = f"{result['md']}{param_block}\n\n类别:{category}"
         try:
             from ..graphrag.ingest import ingest_document
 
