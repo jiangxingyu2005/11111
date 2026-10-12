@@ -1,0 +1,246 @@
+# 在线检索参数配置（QRY-01~05）
+# 变更需先在 validation 集评估，禁止直接上生产
+
+# ============================================================
+# 模型契约位（E1/E2/E3 真模型接入的【唯一登记处】）
+# ------------------------------------------------------------
+# 为什么单独设这一块：
+#   "参数位配了但没生效"是最危险的静默漂移——.env 写 BAAI/bge-m3，
+#   实际跑 hash，链路全绿、契约合法、召回全是噪声且零报错。
+#   所以：① 模型身份只在这里声明；② app/config.py 启动时校验一致性；
+#   ③ real 通道 + hash 后端 = 拒绝启动（宁可停机，不许静默降级）。
+#
+# 接入真模型的三件事，缺一不可（E1 完成动作）：
+#   1. backend: hash -> bge_m3 / bge / openai
+#   2. 重建 Milvus collection（dim 变了旧向量全部失效）
+#   3. 重跑 seed：python scripts/gen_seed.py --embed service
+#      并用 python scripts/check_embed_space.py --expect real 验收
+# ============================================================
+models:
+  embed:
+    id: BAAI/bge-m3            # 定案全量 BGE-M3，与离线 qingxi 侧同模型同空间
+    dim: 1024                  # BGE-M3 dense 固定 1024；换模型必须同步改 + 重建库
+    metric: COSINE
+    max_length: 8192
+    backend: bge_m3            # hash | bge_m3
+    # 稀疏路：与下面 milvus.sparse.enabled 强联动（启动时校验两者必须一致）
+    sparse_enabled: false      # IF-1 扩 text_sparse 列后，此处与 milvus.sparse.enabled 同改 true
+  rerank:
+    id: bge-reranker-v2-m3
+    backend: bge               # hash | bge
+  llm:
+    id: qwen2.5:3b              # ollama 模型名（Q4 量化，CPU 可跑）；生产 GPU 环境换 qwen2.5-14b-instruct
+    backend: openai             # echo | openai | hf | generic（openai=经 ollama 的 /v1 兼容端点）
+    upstream: http://ollama:11434/v1   # ollama 默认地址，部署时可由 .env 的 LLM_UPSTREAM 覆盖
+
+# ============================================================
+# endpoints —— 怎么连到模型（接入自有模型只改这一块，不用改代码）
+# ------------------------------------------------------------
+# backend 决定协议，不需要再单独写 protocol：
+#   hash / bge_m3 / bge / hf / echo -> local（进程内）
+#   openai                          -> OpenAI 兼容 HTTP
+#   generic                         -> 任意 HTTP + 字段路径映射
+#
+# 接入三步：① backend 改成 openai/generic ② 填 url（+ api_key）
+#          ③ 选 preset（主流服务已有现成映射），自研服务再补 request/response
+# 改完用 python scripts/check_provider.py --kind embed 自检，不重启也能验
+# ============================================================
+endpoints:
+  embed:
+    url: ""
+    model: ""                  # 留空则用 models.embed.id
+    api_key: ""
+    headers: {}
+    timeout_s: 30
+    preset: ""                 # 见下方 presets；填了就不必手写 request/response
+    request: {}                # generic 专用：{texts_key, model_key, extra}
+    response: {}               # generic 专用：{dense, sparse} 取值路径
+  rerank:
+    url: ""
+    model: ""
+    api_key: ""
+    headers: {}
+    timeout_s: 10
+    preset: ""
+    request: {}                # {query_key, texts_key, model_key, extra}
+    response: {}               # {scores}
+  llm:
+    url: ""                    # 留空则由 .env 的 LLM_UPSTREAM 提供
+    model: ""                  # 留空则用 models.llm.id
+    api_key: ""
+    headers: {}
+    timeout_s: 180
+    preset: ""
+
+# ---- 现成映射预设：接入主流服务只需在 endpoints.<kind>.preset 填个名字 ----
+presets:
+  tei_embed:                   # HuggingFace Text-Embeddings-Inference
+    protocol: generic
+    request: {texts_key: inputs}
+    response: {dense: "*"}
+  tei_rerank:
+    protocol: generic
+    response: {scores: "*.score"}
+  ollama_embed:                # POST /api/embed {model, input} -> {embeddings:[[...]]}
+    protocol: generic
+    request: {texts_key: input, model_key: model}
+    response: {dense: "embeddings.*"}
+  openai_embed:                # vLLM / Xinference / OneAPI / SiliconFlow / llama.cpp
+    protocol: openai
+  siliconflow_rerank:          # POST /v1/rerank {model, query, documents}
+    protocol: generic
+    request: {texts_key: documents, model_key: model}
+    response: {scores: "results.*.relevance_score"}
+  local_bge_m3:                # 进程内 FlagEmbedding
+    protocol: local
+  local_bge_reranker:
+    protocol: local
+
+milvus:
+  collection: ems_chunks      # 运行时以 env MILVUS_CHUNK_COLLECTION 为准（默认 ems_chunks）；此处为对齐 qingxi 的文档值
+  # A/B 两路稠密向量检索：A 路主向量，B 路副向量（可用于模型版本灰度 / 领域微调）
+  dense:
+    primary:
+      vector_field: embedding
+      metric_type: COSINE
+      top_k: 100
+      threshold: 0.72        # τ_a：命中 confidence ≥ 此值才进入候选
+    secondary:
+      enabled: false           # dense B 路（数值/单位归一化信号参数嵌入）；改 true 即启用
+      vector_field: embedding_v2
+      dim: 256                 # B 路向量维（独立于 A 路 1024；数值分桶空间）
+      metric_type: COSINE
+      top_k: 100
+      threshold: 0.68        # τ_b：B 路可略低于 A 路，但差距不宜 > 0.1
+  sparse:
+    enabled: false             # 2026-09-28 BGE-M3 定案后预留：IF-1 扩 text_sparse 列后改 true 即启用 hybrid
+    field: text_sparse
+    metric_type: IP            # BGE-M3 lexical_weights 是学习稀疏权重，内积度量；不能用 BM25（BM25 是 Milvus 原生 BM25 Function 输出专属）
+    top_k: 100
+    language: zh             # 占位：仅 Milvus 原生 BM25 Function 需要；学习稀疏(IP)忽略
+    stop_words: []           # 占位：同上
+
+hybrid:
+  # 内层 RRF：Milvus 库内融合 dense + sparse
+  rrfranker:
+    k: 60                    # RRF 经验值，微软/实测均建议 60；非特殊场景不建议改
+  top_k_after_hybrid: 50     # 内层 RRF 后给外层融合的 Top 数
+
+fusion:
+  # 外层 RRF：跨模态融合（向量 ∪ 图/社区 ∪ 标量软提权）
+  method: RRF
+  k: 60
+  sources:
+    - name: vector_hybrid
+      weight_rank: 1.0
+    - name: graph_local
+      weight_rank: 1.0
+    - name: graph_global
+      weight_rank: 0.8       # 社区摘要置信度低一档
+    - name: scalar_boost
+      weight_rank: 0.0       # 标量只做 boost 不参与 RRF，见 structured_filter.yaml
+  top_k: 50                  # 外层 RRF 输出给重排
+
+reranker:
+  model: bge-reranker-v2-m3
+  device: cpu               # 本机 CPU-only（torch+cpu），无 CUDA
+  max_length: 512
+  batch_size: 16
+  top_k_in: 10               # CPU cross-encoder 慢：10 条≈7s，再大击穿预算；够选 top5
+  top_k_out: 5               # 最终进入上下文的候选数
+  threshold: 0.35            # 重排分数低于此值的候选直接丢弃，防止无关文本进上下文
+
+# 降级与超时（QRY-07 读取）
+timeout:
+  milvus_hybrid_ms: 800      # 单路最大等待
+  neo4j_local_ms: 600
+  neo4j_global_ms: 2000
+  reranker_ms: 15000           # CPU cross-encoder 精排 10 条实测 ~6-7s；L2 已串行化到重排后、不再与精排争 CPU，15s 为安全裕量
+  nl2query_ms: 20000          # L2 结构化抽取（CPU 3B 生成 JSON 慢）；L2 与召回并行，此值限总预算
+  pg_fetch_ms: 50
+
+graph:
+  # ③-A Local 图遍历（G4 预算 0.6s）
+  entity_link:
+    top_k: 10
+    threshold: 0.55        # 实体链接相似度门槛（低了会引入噪声实体，高了会漏）
+  hops: 2                  # 1~2 跳；>2 跳噪声爆炸且不涨召回（V2.0.1 §3 实测口径）
+  max_degree: 50           # 高度数实体按 confidence 截断，防组合爆炸
+  limit: 50
+  budget_s: 0.6
+
+community:
+  # ③-B 社区摘要路（IF-4 deferred；RETRIEVAL_COMMUNITY_ENABLED=true 后启用）
+  scene_link:
+    top_k: 5
+    threshold: 0.55        # τ_s：Scene KNN 相似度门槛（独立于 τ_a/τ_b）
+  hops: 2
+  max_degree: 50
+  limit: 50
+  budget_s: 0.8
+
+graph_ref:
+  top_n: 5                 # focus 实体取自重排 Top-N 命中（不取 query 提及的实体）
+
+subgraph:
+  # /api/graph/subgraph 默认参数（M-R5）
+  default_hops: 1
+  node_limit: 50
+  edge_limit: 100            # 与 api/subgraph_view.v1.schema.json edges.maxItems=100 对齐
+
+# ============================================================
+# 记忆管理（多人隔离 + 会话多轮 + 压缩 + mem0 长期事实）
+# ------------------------------------------------------------
+# 算法参数以 yaml 为准（遵守「算法参数以 yaml 为准」纪律）；
+# 总开关/身份模式/密钥走 env（MEMORY_ENABLED / MEMORY_AUTH_MODE / MEMORY_JWT_SECRET）。
+# 默认 enabled=false：现有部署与既有用例行为不变。
+# ============================================================
+memory:
+  enabled: false              # 总开关（与 env MEMORY_ENABLED 联动，默认关）
+  window_size: 10             # 窗口保留消息条数（≈5 轮 × 2）
+  budget_tokens: 4096         # 记忆区预算（摘要+窗口估算 token 上限）
+  trigger_ratio: 0.8          # 记忆区占用 ≥ 预算 × 0.8 触发压缩（不按条数）
+  max_compressions: 5         # 压缩次数上限，压满后只留最新 window_size 条原文
+  summary_target_ratio: 0.4   # 压缩后目标占用比例（预留）
+  mem0:
+    vector_store: milvus      # 自托管 AsyncMemory + Milvus（复用 milvus_uri）
+    collection: mem0_memory
+    # embedding 本地化：huggingface provider 进程内跑 graphrag_embedding_model（BAAI/bge-m3，1024 维），
+    # 与离线 qingxi 侧同模型同空间、零外联。需装 sentence-transformers（体积大，见 requirements.txt 说明）。
+
+degradation:
+  budget_s: 5.2              # 检索侧可用预算 = 11.5 - LLM预留6.0 - 上下文0.3
+  cutoffs:
+    - threshold_s: 3.5       # >3.5s 砍重排
+      level: L3
+    - threshold_s: 4.5       # >4.5s 砍图路（保留本地遍历，砍社区摘要）
+      level: L2
+    - threshold_s: 5.0       # >5.0s 砍 NL2Query + 稀疏路
+      level: L1
+    - threshold_s: 5.2       # >5.2s 转 PG 全文兜底
+      level: L0
+
+# ─────────────────────────────────────────────────────────────
+# 后端通道覆盖（dev_overrides.<backend>）
+# 只允许覆盖【阈值 / 超时】这类随环境变化的量；
+# 禁止覆盖算法语义参数（RRF k、top_k、融合结构）——改语义必须改主配置并过评测
+# ─────────────────────────────────────────────────────────────
+dev_overrides:
+  fake:
+    milvus.dense.primary.threshold: 0.05     # 哈希嵌入量纲低，复用 0.72 会杀空召回
+    milvus.dense.secondary.threshold: 0.05
+    graph.entity_link.threshold: 0.10
+    community.scene_link.threshold: 0.10     # 哈希嵌入量纲适配（τ_s）
+    reranker.threshold: 0.02
+    timeout.milvus_hybrid_ms: 3000
+    timeout.neo4j_local_ms: 3000
+  real:
+    # 真实 BGE-M3 余弦量纲校准：query→passage 短问长文，实测 Top1≈0.60~0.66，
+    # 复用契约位 0.72 会把召回杀空。此处只调阈值，不动算法语义（RRF k/top_k/融合结构）
+    milvus.dense.primary.threshold: 0.40
+    milvus.dense.secondary.threshold: 0.40
+    graph.entity_link.threshold: 0.40
+    community.scene_link.threshold: 0.40
+    # 冷启动/空闲卸载后首查需重新 load 集合（秒级），800ms 预算会击穿导致 vector 路首查返空；
+    # 提到 3s 吸收重载成本（warm 查询仍 <1s，此处只是上限，不拖稳态）。
+    timeout.milvus_hybrid_ms: 3000

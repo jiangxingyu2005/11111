@@ -106,7 +106,8 @@ async def _resolve_type_conflicts(session: AsyncSession, entities: list[Entity])
 
 async def extract(session: AsyncSession, llm: Optional[LLMClient], parents: list[dict],
                   entity_types: list[str],
-                  entity_defs: Optional[list] = None) -> list[Entity]:
+                  entity_defs: Optional[list] = None,
+                  alias_library: Optional[list] = None) -> list[Entity]:
     llm = llm or LLMClient()
     allowed_types = list(entity_types)
     _, low = _confidence_gate()
@@ -117,7 +118,7 @@ async def extract(session: AsyncSession, llm: Optional[LLMClient], parents: list
         body = p.get("content", "") or ""
         text = f"{title}\n{body}" if title and title != "无标题" else body
         raw_list = await asyncio.to_thread(llm.extract_entities, text,
-                                           allowed_types, entity_defs)
+                                           allowed_types, entity_defs, alias_library)
         for raw in raw_list:
             # 小模型(如 ollama qwen2.5:3b)偶发漏 confidence 字段,默认中档置信,不因此丢实体
             if isinstance(raw, dict) and raw.get("confidence") is None:

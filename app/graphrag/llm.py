@@ -24,9 +24,10 @@ class LLMClient:
 
     # ---- 阶段一:实体抽取(返回结构化实体列表,未归一化/未发号)----
     def extract_entities(self, text: str, entity_types: Optional[list] = None,
-                         entity_defs: Optional[list] = None) -> list[dict]:
+                         entity_defs: Optional[list] = None,
+                         alias_library: Optional[list] = None) -> list[dict]:
         if self.is_llm:
-            return self._extract_entities_openai(text, entity_types, entity_defs)
+            return self._extract_entities_openai(text, entity_types, entity_defs, alias_library)
         return _mock_extract_entities(text, entity_types or [])
 
     # ---- 阶段二:关系抽取(实体对 + 证据句)----
@@ -122,7 +123,7 @@ class LLMClient:
         s = self.settings["llm"]
         return OpenAI(base_url=s.get("base_url"), api_key=s.get("api_key") or "sk-dummy")
 
-    def _extract_entities_openai(self, text, entity_types, entity_defs):
+    def _extract_entities_openai(self, text, entity_types, entity_defs, alias_library=None):
         client = self._client()
         llm_cfg = self.settings["llm"]
         types = list(entity_types or [])
@@ -141,7 +142,7 @@ class LLMClient:
             }},
             "required": ["entities"],
         }
-        instruction = _entity_instruction(types, entity_defs)
+        instruction = _entity_instruction(types, entity_defs, alias_library)
         instruction += ("原文标题、型号编码、书名号内名称、以及「型号 XXX」必须抽成实体,"
                         "中文称呼写入 aliases,不要只留编码丢掉中文名。没有的类型不要编造。")
         return _call_function(client, llm_cfg, "extract_entities", instruction, text, schema)["entities"]
@@ -326,8 +327,13 @@ _PARAM_RULE = ("频率、频段、脉宽、重频、带宽、调制方式等参�
                "辐射源/平台/武器填写粒度：泛指某型装备为「型号」，指具体某一部/艘/架为「个体」。")
 
 
-def _entity_instruction(entity_types: Optional[list], entity_defs: Optional[list]) -> str:
-    """实体抽取指令:有完整定义(entity_defs)时讲清每类含义与属性 schema,否则退回类型名列表。"""
+def _entity_instruction(entity_types: Optional[list], entity_defs: Optional[list],
+                        alias_library: Optional[list] = None) -> str:
+    """实体抽取指令:有完整定义(entity_defs)时讲清每类含义与属性 schema,否则退回类型名列表。
+
+    alias_library(可选)为别名库 [{"alias","entity_type"}] 动态提示词:告知模型这些代号
+    属于对应实体类型,抽取时认出代号、不判错类型。
+    """
     tail = ("注意：实体类型只能从上述列表中选择，禁止用报告字段名(如国别/制造商/频段/体制/用途)当类型；"
             "国别/制造商优先写入所属装备的 properties（如 {\"国别\": \"英国\"}）；"
             "仅当国别作为独立标签出现时才建组织节点，不要把「英国皇家海军」拆成「英国」。"
@@ -343,8 +349,19 @@ def _entity_instruction(entity_types: Optional[list], entity_defs: Optional[list
                 line += (f"\n  该类型属性字段(properties 按此结构填)："
                          f"{json.dumps(js, ensure_ascii=False)}")
             lines.append(line)
-        return "抽取电磁信号领域实体，类型限定如下：\n" + "\n".join(lines) + "\n\n" + tail
-    return f"抽取电磁信号领域实体，类型限定：{entity_types}\n\n" + tail
+        base = "抽取电磁信号领域实体，类型限定如下：\n" + "\n".join(lines) + "\n\n" + tail
+    else:
+        base = f"抽取电磁信号领域实体，类型限定：{entity_types}\n\n" + tail
+    if alias_library:
+        allowed = set(entity_types or [])
+        lines = [f"- {a.get('alias', '')} → {a.get('entity_type', '')}"
+                 for a in alias_library
+                 if a.get("entity_type") in allowed]
+        if lines:
+            base += ("\n\n代号字典（下列代号已在类别字典登记，抽取时若文中出现，必须识别为对应"
+                     "实体类型的实体，name 用代号本身，entity_type 用右侧类型，不要漏抽、不要判错类型）：\n"
+                     + "\n".join(lines))
+    return base
 
 
 def _relation_instruction(entity_names: list, relation_types: list) -> str:

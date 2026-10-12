@@ -656,14 +656,16 @@ def clean_by_snr(I: np.ndarray, Q: np.ndarray, segment_len: int = 128,
             "snr_threshold_db": snr_threshold_db,
         }
     
-    # 拼接有效片段
-    segments_to_keep = []
+    # 拼接有效片段（I/Q 分开拼，逐段 [I段|Q段] 块拼接后用奇偶切片会交错错位）
+    i_segments = []
+    q_segments = []
     for idx in valid_indices:
         start = idx * segment_len
         end = start + segment_len
-        segments_to_keep.append(np.concatenate([I[start:end], Q[start:end]]))
-    
-    if not segments_to_keep:
+        i_segments.append(I[start:end])
+        q_segments.append(Q[start:end])
+
+    if not i_segments:
         # 极端情况：所有片段都被剔除，返回原信号并警告
         return I, Q, {
             "total_segments": int(num_segments),
@@ -677,9 +679,8 @@ def clean_by_snr(I: np.ndarray, Q: np.ndarray, segment_len: int = 128,
             "warning": "所有片段SNR均低于阈值，返回原始信号",
         }
     
-    combined = np.concatenate(segments_to_keep)
-    I_cleaned = combined[0::2]
-    Q_cleaned = combined[1::2]
+    I_cleaned = np.concatenate(i_segments)
+    Q_cleaned = np.concatenate(q_segments)
     
     valid_snr = snr_values[valid_mask]
     

@@ -1,0 +1,42 @@
+# model_stub（8010）：进程内加载 BGE-M3 嵌入 + bge-reranker-v2-m3 重排
+# 模型文件在构建时烘焙进镜像（见下方 COPY），目标机无需再放模型。
+# 对外暴露 /embed /rerank /v1/chat/completions /healthz 等，供 retrieval(8100) 调用。
+FROM docker.m.daocloud.io/library/python:3.12-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=120 \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends curl gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# torch 走 CPU 源（避免默认抓 CUDA 大包），再装 FlagEmbedding/transformers 等推理依赖
+RUN pip install -U pip -i https://pypi.tuna.tsinghua.edu.cn/simple \
+ && pip install torch --index-url https://download.pytorch.org/whl/cpu \
+ && pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
+        FlagEmbedding>=1.2 transformers>=4.40 \
+        fastapi uvicorn[standard] httpx PyYAML
+
+# model_stub 运行所需代码（providers 与 model_stub 同目录；common 供 nacos_client 用）
+COPY common /app/common
+COPY retrieval/services /app/retrieval/services
+COPY retrieval/config /app/retrieval/config
+
+# Nacos bootstrap：model_stub 的 _read_bootstrap_env() 只读 retrieval/.env 文件
+COPY deploy/retrieval.docker.env /app/retrieval/.env
+
+# 烘焙模型（CPU 加载，~4.6GB；路径与 compose 的 EMBED_MODEL/RERANK_MODEL 对齐）
+COPY retrieval/model/models/BAAI--bge-m3/snapshots/master /app/models/bge-m3
+COPY retrieval/model/models/models/BAAI--bge-reranker-v2-m3/snapshots/master /app/models/bge-reranker-v2-m3
+
+EXPOSE 8010
+
+HEALTHCHECK --interval=20s --timeout=5s --start-period=90s --retries=15 \
+  CMD curl -fsS http://127.0.0.1:8010/healthz || exit 1
+
+CMD ["python", "retrieval/services/model_stub.py", "--host", "0.0.0.0", "--port", "8010"]

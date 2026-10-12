@@ -18,7 +18,7 @@ from ..models import IngestQuality, SourceFileRegistry
 from ..utils.database import SessionLocal
 from . import chunk, db, embed, extract_entities, extract_relations, neo4j_load, resolve
 from .binding import bind_back
-from .dict import load_entity_defs, load_relations
+from .dict import load_alias_library, load_entity_defs, load_relations
 from .embeddings import EmbeddingClient
 from .llm import LLMClient
 from .mesh.apply import enhance_graph
@@ -61,8 +61,10 @@ async def ingest_document(kb_id: UUID, doc_id: str, clean_md: str, engine: str,
             entity_defs = await load_entity_defs(session)
             entity_types = [d["name"] for d in entity_defs]
             relation_defs = await load_relations(session)
-            # 5. 实体抽取(完整定义供 LLM prompt 讲清类型含义)
-            entities = await extract_entities.extract(session, llm, parents, entity_types, entity_defs)
+            alias_library = await load_alias_library(session)
+            # 5. 实体抽取(完整定义供 LLM prompt 讲清类型含义;别名库作动态提示词注入)
+            entities = await extract_entities.extract(session, llm, parents, entity_types,
+                                                      entity_defs, alias_library)
             # 6. 关系抽取
             relations, _ = await extract_relations.extract(session, entities, llm, parents, relation_defs)
             # 6.5 跨文档消歧:对齐到全局注册表 + 写回(开关关闭时原样透传)

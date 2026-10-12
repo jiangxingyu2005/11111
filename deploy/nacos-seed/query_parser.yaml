@@ -1,0 +1,232 @@
+# config/query_parser.yaml
+# QRY-02 结构化条件解析配置 —— ④ 路的上游
+#
+# 定位：回答"要不要提前做一套像正则一样的东西"。
+#   要预置，但预置的是【配置 + 词典 + 校验器】，不是靠正则去硬匹配整句 query。
+#   同一份配置同时喂给 L1（规则快速通道）和 L3（校验器），保证两条路口径一致。
+#
+# 三层通道：
+#   L1 词典 + 正则   → 高频确定表述，O(1)，不走 LLM，结果可预测可单测
+#   L2 LLM 抽取     → 主力，覆盖长尾表述，输出严格 JSON
+#   L3 校验器        → 用本配置卡合法性，不过关一律降级为 soft 或丢弃
+#
+# 排障指引：
+#   - 条件没抽出来   → 查 band_table / unit_convert / enum_alias 是否覆盖该表述
+#   - 硬过滤误杀     → 查 validator 是否放行；查 strength.tau_hard 是否过低
+#   - 单位错（9.5G 当成 9.5Hz）→ 查 unit_convert 缺项
+#   - 波段不生效     → 查 band_table 是否把 X波段 展开成了区间
+#
+version: 1.0
+depends: config/structured_filter.yaml
+
+# ─────────────────────────────────────────────────────────────
+# 1. 波段词表（领域关键，通用 LLM 最容易错的一块）
+#    注意：波段是【区间】，不是单值。不预置这张表，LLM 大概率只给一个中心频点，
+#    导致 expr 写成等值比较 → 大量漏召回。
+# ─────────────────────────────────────────────────────────────
+band_table:
+  - {alias: [L波段, L band, L频段],       rf_ghz: [1.0, 2.0]}
+  - {alias: [S波段, S band, S频段],       rf_ghz: [2.0, 4.0]}
+  - {alias: [C波段, C band, C频段],       rf_ghz: [4.0, 8.0]}
+  - {alias: [X波段, X band, X频段],       rf_ghz: [8.0, 12.0]}
+  - {alias: [Ku波段, Ku band],            rf_ghz: [12.0, 18.0]}
+  - {alias: [K波段, K band],              rf_ghz: [18.0, 27.0]}
+  - {alias: [Ka波段, Ka band],            rf_ghz: [27.0, 40.0]}
+  - {alias: [毫米波, mmWave],             rf_ghz: [30.0, 300.0]}
+  - {alias: [米波, VHF],                  rf_ghz: [0.03, 0.3]}
+  - {alias: [分米波, UHF],                rf_ghz: [0.3, 1.0]}
+# 注：命中波段 → 直接展开为 [min,max] 区间，按 structured_filter.yaml 的 interval_rule 做相交比较
+
+# ─────────────────────────────────────────────────────────────
+# 2. 单位换算（全部归一到 structured_filter.yaml 里字段的基准单位）
+# ─────────────────────────────────────────────────────────────
+unit_convert:
+  rf:
+    base: GHz
+    rules:
+      - {from: [GHz, G, 吉赫, 吉赫兹],          to_base: 1.0}
+      - {from: [MHz, M, 兆赫, 兆赫兹],          to_base: 0.001}
+      - {from: [kHz, K, 千赫],                  to_base: 0.000001}
+      - {from: [Hz, 赫兹],                      to_base: 0.000000001}
+    warn: "LLM 常漏单位，裸数字'9.5'默认按 GHz 解释，并在 degraded 里记 unit_inferred"
+  pw:
+    base: us
+    rules:
+      - {from: [us, μs, 微秒],                  to_base: 1.0}
+      - {from: [ms, 毫秒],                      to_base: 1000.0}
+      - {from: [ns, 纳秒],                      to_base: 0.001}
+  prf:
+    base: Hz
+    rules:
+      - {from: [Hz, 赫兹],                      to_base: 1.0}
+      - {from: [kHz, K, 千赫],                  to_base: 1000.0}
+      - {from: [MHz, M, 兆赫],                  to_base: 1000000.0}
+      - {from: [pps, 脉冲每秒],                 to_base: 1.0}
+  doa:
+    base: deg
+    rules:
+      - {from: [度, deg, °],                    to_base: 1.0}
+      - {from: [弧度, rad],                     to_base: 57.2958}
+    normalize: "方位角归一化到 [0,360)，跨 0 度区间（如 350~10）必须拆成两段 OR"
+
+# ─────────────────────────────────────────────────────────────
+# 3. L1 正则 / 词典快速通道
+#    只覆盖"高频 + 确定"的表述，命中就不再调 LLM。
+#    价值：省一次 LLM 调用（约 200~400ms）、结果可预测、可写单测。
+# ─────────────────────────────────────────────────────────────
+l1_rules:
+  enabled: true
+  max_hit_ratio_note: "生产埋点 L1 命中率，稳定低于 30% 说明规则库该扩了"
+  patterns:
+    - id: R-RF-POINT
+      desc: 单个频点，如"9.5GHz""9.5G"
+      regex: '(\d+(?:\.\d+)?)\s*(GHz|G|MHz|M|吉赫|兆赫)'
+      out: {field: rf, kind: point, tolerance_ref: tolerance.rf_ghz}
+      confidence: 0.92
+    - id: R-RF-RANGE
+      desc: 频段区间，如"8~12GHz""8-12GHz"
+      regex: '(\d+(?:\.\d+)?)\s*[~\-—到至]\s*(\d+(?:\.\d+)?)\s*(GHz|G|MHz|M|吉赫|兆赫)'
+      out: {field: rf, kind: range}
+      confidence: 0.95
+    - id: R-DOA-RANGE
+      desc: 方位区间，如"方位30~60度"
+      regex: '(?:方位|方位角|来波方向|DOA)?\s*(\d+(?:\.\d+)?)\s*[~\-—到至]\s*(\d+(?:\.\d+)?)\s*(?:度|deg|°)'
+      out: {field: doa, kind: range, tolerance_ref: tolerance.doa_deg}
+      confidence: 0.93
+    - id: R-DOA-POINT
+      desc: 单个方位，如"45度"
+      regex: '(?:方位|方位角)?\s*(\d+(?:\.\d+)?)\s*(?:度|deg|°)'
+      out: {field: doa, kind: point}
+      confidence: 0.85
+    - id: R-TIME-YM
+      desc: 年月，如"2024年3月"
+      regex: '(20\d{2})\s*年\s*(\d{1,2})\s*月'
+      out: {field: toa, kind: month}
+      confidence: 0.95
+    - id: R-TIME-YMD
+      desc: 完整日期，如"2024-03-15"
+      regex: '(20\d{2})[-/年](\d{1,2})[-/月](\d{1,2})'
+      out: {field: toa, kind: day}
+      confidence: 0.96
+    - id: R-PW
+      desc: 脉宽，如"脉宽1.2us"
+      regex: '(?:脉宽|PW)?\s*(\d+(?:\.\d+)?)\s*(us|μs|微秒|ms|毫秒|ns|纳秒)'
+      out: {field: pw, kind: point, tolerance_ref: tolerance.pw_us}
+      confidence: 0.88
+    - id: R-PRF
+      desc: 重频，如"重频1000Hz"
+      regex: '(?:重频|PRF|脉冲重复频率)?\s*(\d+(?:\.\d+)?)\s*(Hz|kHz|K|MHz|pps)'
+      out: {field: prf, kind: point, tolerance_ref: tolerance.prf_hz}
+      confidence: 0.88
+  # 枚举走词典精确包含（不用正则，避免误伤长句）
+  lexicon:
+    source: enum_alias.modulation + enum_alias.platform_type + band_table[].alias
+    confidence: 0.90
+    longest_match: true          # 优先最长匹配，避免"线性调频"被"调频"先命中
+
+# ─────────────────────────────────────────────────────────────
+# 4. L2 LLM 抽取契约（未命中 L1 才调）
+# ─────────────────────────────────────────────────────────────
+l2_llm:
+  enabled: true
+  model_ref: "与 QRY-02 意图分类共用一次调用，禁止为条件单独再调一次"
+  output_schema:
+    type: object
+    required: [conditions, intent]
+    properties:
+      intent: {enum: [ENTITY_LEVEL, GLOBAL, HYBRID, STRUCTURED_ONLY]}
+      conditions:
+        type: array
+        items:
+          type: object
+          required: [field, op, value, confidence]
+          properties:
+            field:   {enum: [rf, pw, prf, doa, toa, snr, modulation, platform_type, country]}
+            op:      {enum: [range, point, eq]}
+            value:   {desc: "range → [min,max]；point → 数值；eq → 枚举字面值"}
+            unit:    {desc: "原始单位，缺省按 unit_convert.warn 处理"}
+            raw:     {desc: "原文片段，用于审计，长度 ≤32"}
+            confidence: {type: number, minimum: 0, maximum: 1}
+  hard_rules:
+    - "只输出用户【明确说出来】的条件，禁止推测补全"
+    - "枚举字段必须输出 enum 字面值（LFM 而非'线性调频'）"
+    - "波段必须展开为区间，禁止输出中心频点"
+    - "模糊表述（高频段/近期/左右）confidence 上限 0.6，由 strength.fuzzy_tokens 强制降级 soft"
+    - "输出必须是合法 JSON，不允许任何解释性文字"
+
+# ─────────────────────────────────────────────────────────────
+# 5. L3 校验器（最关键：LLM 输出不许直接变 hard）
+#    任何一条不过 → 该条件降级 soft；全部不过 → ④ 路不参与，走常规向量检索
+# ─────────────────────────────────────────────────────────────
+validator:
+  enabled: true
+  checks:
+    - id: V-01
+      desc: 字段存在性
+      rule: "field 必须在 scalar_fields 中"
+      on_fail: drop
+    - id: V-02
+      desc: 枚举合法性
+      rule: "eq 条件的值必须在该字段 enum 列表内"
+      on_fail: drop
+    - id: V-03
+      desc: 量纲合理区间（防 LLM 抽风输出 9.5Hz 的雷达）
+      rule: |
+        rf  ∈ [0.01, 300] GHz
+        pw  ∈ [0.01, 10000] us
+        prf ∈ [1, 2_000_000] Hz
+        doa ∈ [0, 360) deg
+        snr ∈ [-40, 80] dB
+      on_fail: drop
+    - id: V-04
+      desc: 区间自洽
+      rule: "range 必须 min <= max；point 展开区间后 min <= max"
+      on_fail: drop
+    - id: V-05
+      desc: 时间可解析
+      rule: "toa 必须能归一为 Unix ms 区间，解析失败即丢弃"
+      on_fail: drop
+    - id: V-06
+      desc: 置信度门槛
+      rule: "confidence < strength.tau_soft 丢弃；命中 fuzzy_tokens 强制 soft"
+      on_fail: drop_or_soften
+  on_all_dropped: "④ 路本次不参与，走常规向量检索 + degraded 标记 scalar_conditions_dropped"
+  never: "校验器不得放宽量纲区间去迁就错误输出——量纲错就是抽取错，宁可丢弃"
+
+# ─────────────────────────────────────────────────────────────
+# 6. 评测集（条件解析准确率怎么测）
+# ─────────────────────────────────────────────────────────────
+evalset:
+  path: data/structured_query/
+  dev:  qc_dev.csv        # 调 tau_hard / 容差 / 正则用（19 条）
+  test: qc_test.csv       # 验收只跑一次，跑完不许回头改参（24 条）
+  schema: [qid, query, gold_conditions_json, gold_strength, gold_intent, scenario]
+  note: "gold_strength 取值 hard / soft / none；fuzzy 场景必须为 soft，no_condition 必须为 none"
+  scenarios:
+    - point_value        # "9.5GHz 的信号"
+    - explicit_range     # "8~12GHz"
+    - band_alias         # "X波段" → 需要波段表
+    - unit_convert       # "9500MHz" → 9.5GHz
+    - time_expr          # "2024年3月" / "近三个月"
+    - enum_expr          # "线性调频"
+    - fuzzy_expr         # "高频段" → 必须 soft，禁止 hard
+    - multi_condition    # 三个条件叠加
+    - cross_zero_doa     # "方位 350~10 度" → 跨 0 度拆两段
+    - no_condition       # 纯语义问题，条件集应为空
+  metric: "条件级精确匹配 F1（field + op + 归一后 value 三者全对才算对）"
+  gates:
+    - id: G-QP-01
+      desc: 硬条件误杀率
+      assert: "gold 为空但解析出 hard 条件的样本占比 = 0%（误硬过滤会真实丢召回）"
+    - id: G-QP-02
+      desc: 模糊表述必须降级
+      assert: "fuzzy_expr 场景解析结果强度 = soft，hard 数 = 0"
+    - id: G-QP-03
+      desc: 波段展开
+      assert: "band_alias 场景输出必须是 range 而非 point，准确率 100%"
+    - id: G-QP-04
+      desc: 单位换算
+      assert: "unit_convert 场景归一后数值误差 < 1%，准确率 100%"
+    - id: G-QP-05
+      desc: 量纲校验生效
+      assert: "注入越界值（如 rf=9.5Hz）测试，校验器丢弃率 = 100%"

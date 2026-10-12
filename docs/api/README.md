@@ -17,6 +17,7 @@ qingxi 服务全部 HTTP 接口,按类别拆分到本目录各文件。Base URL 
 | 知识库管理 | [02-knowledge-bases.md](02-knowledge-bases.md) |
 | 文档下载 | [03-documents.md](03-documents.md) |
 | 抽取字典 | [04-graph-dict.md](04-graph-dict.md) |
+| 别名库 | [04b-graph-alias.md](04b-graph-alias.md) |
 | 在线查询与溯源 | [05-graph-query-trace.md](05-graph-query-trace.md) |
 | 分段管理 | [06-graph-segments.md](06-graph-segments.md) |
 | 路由与对账 | [07-graph-route-reconcile.md](07-graph-route-reconcile.md) |
@@ -34,6 +35,7 @@ qingxi 服务全部 HTTP 接口,按类别拆分到本目录各文件。Base URL 
 | 知识库管理 | `/knowledge-bases` `/knowledge-bases/{kb_id}` `/knowledge-bases/{kb_id}/documents` | POST/GET/PUT/DELETE |
 | 文档下载 | `/documents/{doc_id}/download` `/documents/{doc_id}/desensitize` | GET |
 | 抽取字典 | `/graph/dict` `/graph/dict/{dict_id}` | POST/GET/PUT/DELETE |
+| 别名库 | `/graph/alias` `/graph/alias/{alias_id}` | POST/GET/PUT/DELETE |
 | 在线查询与溯源 | `/graph/query` `/graph/query/stream` `/graph/trace/files` `/graph/trace/files/{doc_id}` `/graph/trace/files/{doc_id}/locate` | POST/GET |
 | 分段管理 | `/graph/segments` `/graph/segments/{parent_id}` `/graph/segments/{parent_id}/enabled` `/graph/documents/{doc_id}/enabled` `/graph/documents/{doc_id}/blocks` | GET/POST/PUT |
 | 路由与对账 | `/graph/route` `/graph/reconcile` | POST |
@@ -47,6 +49,6 @@ qingxi 服务全部 HTTP 接口,按类别拆分到本目录各文件。Base URL 
 - **认证**:无(内网服务)。
 - **`kb_id`**:知识库 id(UUID),清洗/入图谱按知识库隔离。
 - **时间**:ISO 8601 字符串。
-- **逻辑删除**:删除接口均置 `deleted_at`,不物理删除。
+- **逻辑删除**:除别名库(`/graph/alias`,物理删除)外,删除接口均置 `deleted_at`,不物理删除。
 - **失败兜底**:单文件处理失败返回 `success=false` + `error`,不中断整批;GraphRAG 入库失败不影响 parse 主链路(仅告警,`in_kb` 保持 `false`)。
 - **配置**:全部在 `.env`,不走 yaml。

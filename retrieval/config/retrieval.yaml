@@ -241,3 +241,6 @@ dev_overrides:
     milvus.dense.secondary.threshold: 0.40
     graph.entity_link.threshold: 0.40
     community.scene_link.threshold: 0.40
+    # 冷启动/空闲卸载后首查需重新 load 集合（秒级），800ms 预算会击穿导致 vector 路首查返空；
+    # 提到 3s 吸收重载成本（warm 查询仍 <1s，此处只是上限，不拖稳态）。
+    timeout.milvus_hybrid_ms: 3000

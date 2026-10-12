@@ -1,0 +1,26 @@
+# 关系类型白名单 —— /api/graph/subgraph 的 relation_types 白名单引用目标
+# （api/subgraph_view.v1.schema.json 的 query.relation_types 描述指向本文件）
+#
+# 单一事实源：与 qingxi 离线侧严格对齐，检索侧只读消费、不得新增关系类型。
+#   显式抽取关系 = qingxi app/graphrag/seed.py 的 _RELATIONS（11 类，合法 Cypher 标识，全大写）
+#   派生关系     = qingxi app/graphrag/mesh/derived.py（3 类，带 derived=true 标记，可整体重算）
+# qingxi 变更 extraction_dict 字典后，必须同步本文件，否则 relation_types 过滤会出现契约漂移。
+version: "1.0"
+
+extracted:            # 显式抽取关系（extraction_dict 种子）
+  - SOURCE_OF         # 来源
+  - COMPOSED_OF       # 组成
+  - MERGED_INTO       # 归并为
+  - MODEL_MATCH       # 型号匹配
+  - EQUIPPED_ON       # 装备于
+  - BELONGS_TO        # 隶属
+  - HAS_STATE         # 具有状态
+  - RELATED_TARGET    # 关联目标
+  - PLATFORM_CANDIDATE# 平台候选
+  - PRODUCES          # 产生
+  - WRITTEN_INTO      # 写入
+
+derived:              # 元数据派生关系（文本边稀疏时的保底连通）
+  - SAME_BAND         # 频段重叠
+  - CO_TIME           # 时间窗共现
+  - CO_LOCATE         # 活动区域相交
