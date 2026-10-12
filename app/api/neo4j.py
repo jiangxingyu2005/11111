@@ -15,6 +15,8 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel
 
+from ..graphrag.ids import canonical_entity_id, normalize_name
+from ..graphrag.models import Entity
 from ..graphrag.neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
@@ -65,7 +67,7 @@ def _entity_full(r: dict) -> dict:
 
 # ---- 请求模型 ----
 class EntityCreate(BaseModel):
-    entity_id: str
+    entity_id: str | None = None   # 不传则用 canonical_entity_id(name, entity_type) 自动生成
     name: str
     entity_type: str
     aliases: list[str] = []
@@ -177,17 +179,81 @@ async def get_graph_entity(entity_id: str) -> dict:
             "relations": {"out": out, "in": inn}}
 
 
+async def _sync_registry_and_vector(entity_id: str, name: str, entity_type: str,
+                                     aliases: list, properties: dict):
+    """前端增实体时同步写 PG entity_registry + Milvus ems_entities(消歧/向量检索可用)。"""
+    from ..graphrag import db
+    from ..graphrag.embeddings import EmbeddingClient
+    from ..graphrag.mesh.registry import fingerprint
+    from ..graphrag.milvus_client import AsyncMilvusClient
+    from ..models import EntityRegistryEntry
+    from ..utils.database import SessionLocal
+
+    async with SessionLocal() as session:
+        key = normalize_name(name)
+        alias_keys = [normalize_name(a) for a in (aliases or [])]
+        fp = fingerprint(properties)
+        existing = await db.select_where(session, EntityRegistryEntry, entity_id=entity_id)
+        if existing:
+            prev = existing[0]
+            merged = list(prev.get("aliases") or [])
+            for a in [key] + alias_keys:
+                if a and a not in merged:
+                    merged.append(a)
+            props = dict(prev.get("properties") or {})
+            for k, v in (properties or {}).items():
+                props.setdefault(k, v)
+            await db.upsert(session, EntityRegistryEntry, {
+                "entity_id": entity_id, "name": prev.get("name") or key,
+                "entity_type": entity_type, "aliases": merged,
+                "fingerprint": fp or prev.get("fingerprint"),
+                "properties": props, "status": "active"}, "entity_id")
+        else:
+            await db.upsert(session, EntityRegistryEntry, {
+                "entity_id": entity_id, "name": key, "entity_type": entity_type,
+                "aliases": list(dict.fromkeys([key] + alias_keys)),
+                "fingerprint": fp, "properties": dict(properties or {}),
+                "status": "active"}, "entity_id")
+        await session.commit()
+    try:
+        milvus = AsyncMilvusClient()
+        vec = EmbeddingClient().embed_one(name)
+        await milvus.upsert_entity_vector(entity_id, name, entity_type, vec)
+    except Exception:
+        logger.warning("实体向量写入失败(entity_id=%s),不影响 Neo4j/PG", entity_id)
+
+
+async def _remove_registry_and_vector(entity_id: str):
+    """前端删实体时同步清 PG entity_registry + Milvus ems_entities。"""
+    from ..graphrag import db
+    from ..graphrag.milvus_client import AsyncMilvusClient
+    from ..models import EntityRegistryEntry
+    from ..utils.database import SessionLocal
+
+    async with SessionLocal() as session:
+        await db.delete(session, EntityRegistryEntry, entity_id, "entity_id")
+        await session.commit()
+    try:
+        await AsyncMilvusClient().delete_entity_vector(entity_id)
+    except Exception:
+        logger.warning("实体向量删除失败(entity_id=%s)", entity_id)
+
+
 @router.post("/entities", status_code=status.HTTP_201_CREATED)
 async def create_graph_entity(body: EntityCreate) -> dict:
-    """新建/合并实体节点(MERGE 幂等)。"""
+    """新建/合并实体节点(MERGE 幂等)。同步写 PG 注册表 + Milvus 实体向量。"""
+    eid = body.entity_id or canonical_entity_id(body.name, body.entity_type)
+    data = {**body.model_dump(), "entity_id": eid}
     try:
         async with Neo4jClient() as neo4j:
-            await neo4j.merge_entity(body.model_dump())
-            node = await neo4j.get_entity_node(body.entity_id)
+            await neo4j.merge_entity(data)
+            node = await neo4j.get_entity_node(eid)
     except Exception as e:
         logger.exception("创建实体失败")
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
                             detail=f"创建实体失败: {e}")
+    await _sync_registry_and_vector(eid, body.name, body.entity_type,
+                                     body.aliases, body.properties)
     return _entity_full(node)
 
 
@@ -212,7 +278,7 @@ async def update_graph_entity(entity_id: str, body: EntityUpdate) -> dict:
 
 @router.delete("/entities/{entity_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_graph_entity(entity_id: str) -> None:
-    """删除实体节点(DETACH DELETE,连带 BINDS/关系边)。不存在返回 404。"""
+    """删除实体节点(DETACH DELETE,连带 BINDS/关系边)。同步清 PG 注册表 + Milvus 向量。"""
     try:
         async with Neo4jClient() as neo4j:
             if await neo4j.get_entity_node(entity_id) is None:
@@ -224,6 +290,7 @@ async def delete_graph_entity(entity_id: str) -> None:
         logger.exception("删除实体失败")
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
                             detail=f"删除实体失败: {e}")
+    await _remove_registry_and_vector(entity_id)
 
 
 # ---- 父块 Segment 节点(Neo4j 侧) ----
