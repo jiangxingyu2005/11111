@@ -55,6 +55,39 @@ def _cond(ctx: dict, condition: dict) -> bool:
     return True
 
 
+def _match_stats(ctx: dict, condition: dict) -> tuple[bool, float]:
+    """返回 (是否触发, 条件命中比例)。
+
+    all: 全命中才算触发, 命中比例 = 命中子句 / 总子句
+    any: 命中一条即触发, 命中比例 = 命中子句 / 总子句
+    两者都有: all 必须全过, any 算加分。
+    """
+    if not isinstance(condition, dict):
+        return False, 0.0
+    alls = [c for c in (condition.get("all") or []) if isinstance(c, dict)]
+    anys = [c for c in (condition.get("any") or []) if isinstance(c, dict)]
+    if not alls and not anys:
+        return False, 0.0
+    all_hit = sum(1 for c in alls if _clause(ctx, c))
+    any_hit = sum(1 for c in anys if _clause(ctx, c))
+    total = len(alls) + len(anys)
+    ratio = (all_hit + any_hit) / total if total else 0.0
+    triggered = (not alls or all_hit == len(alls)) and (not anys or any_hit > 0)
+    return triggered, round(ratio, 4)
+
+
+def _confidence(triggered: bool, ratio: float, retrieval: float) -> float:
+    """置信度 = 检索相关度 × 条件命中比例,由数据算出,不写死。
+
+    触发: 0.5×检索分 + 0.5×条件命中比例
+    未触发: 0.3×条件命中比例(部分命中给一点分,全不中给 0)
+    """
+    retrieval = max(min(retrieval, 1.0), 0.0)
+    if triggered:
+        return round(0.5 * retrieval + 0.5 * ratio, 4)
+    return round(0.3 * ratio, 4)
+
+
 def hit_context(hit: dict, kb_id=None) -> dict:
     return {
         "content": hit.get("content") or "",
@@ -65,8 +98,51 @@ def hit_context(hit: dict, kb_id=None) -> dict:
     }
 
 
+_OP_CN = {"lt": "小于", "lte": "小于等于", "gt": "大于", "gte": "大于等于",
+          "eq": "等于", "ne": "不等于", "contains": "包含"}
+_FIELD_CN = {"content": "正文", "rerank_score": "检索分数", "kb_id": "知识库",
+             "section": "章节", "kg_confidence": "抽取置信度"}
+
+
+def _render_condition(cond: dict) -> str:
+    """把 DSL 条件渲染成前端可直接展示的自然语言。
+
+    优先用 condition.display;没有则从 all/any 子句拼。
+    """
+    if not isinstance(cond, dict):
+        return ""
+    if cond.get("display"):
+        return str(cond["display"])
+    parts = []
+    for key, conj in (("all", " 且 "), ("any", " 或 ")):
+        clauses = cond.get(key) or []
+        rendered = []
+        for c in clauses:
+            if not isinstance(c, dict):
+                continue
+            fld = _FIELD_CN.get(str(c.get("field")), str(c.get("field")))
+            op = _OP_CN.get(str(c.get("op")), str(c.get("op")))
+            val = c.get("value")
+            rendered.append(f"{fld} {op} {val}")
+        if rendered:
+            parts.append(conj.join(rendered))
+    return "；".join(parts)
+
+
+def _render_evidence(triggered: bool, evidence: str | None, name: str) -> str:
+    """把证据拼成叙事格式:「观测：… → 条件满足 / → 规则未触发」。"""
+    if triggered and evidence:
+        return f"观测：{evidence} → 条件满足"
+    return f"观测：当前问答上下文未满足「{name}」全部条件 → 规则未触发"
+
+
 def eval_stored_rules(rules: list[dict], hits: list[dict], kb_scope=None) -> list[dict]:
-    """返回每条规则的求值结果(含未触发)。Prompt 只用 triggered 且有 hint 的。"""
+    """返回每条规则的求值结果(含未触发)。Prompt 只用 triggered 且有 hint 的。
+
+    输出字段对齐前端报告页:
+      triggered / confidence / condition_display / evidence_narrative
+      action: intent / priority / weight / label / severity / hint
+    """
     out: list[dict] = []
     for rule in rules:
         if not rule.get("enabled", True):
@@ -77,22 +153,40 @@ def eval_stored_rules(rules: list[dict], hits: list[dict], kb_scope=None) -> lis
             if rid and rid not in ids:
                 continue
         cond = rule.get("condition") or {}
+        best_trig = False
+        best_ratio = 0.0
+        best_retr = 0.0
         evidence = None
-        triggered = False
         for h in hits:
-            if _cond(hit_context(h, kb_scope), cond):
-                triggered = True
-                evidence = (h.get("content") or "")[:80]
-                break
+            ctx = hit_context(h, kb_scope)
+            trig, ratio = _match_stats(ctx, cond)
+            retr = float(h.get("_score") or 0.0)
+            if trig and (not best_trig or ratio > best_ratio or
+                         (ratio == best_ratio and retr > best_retr)):
+                best_trig, best_ratio, best_retr = True, ratio, retr
+                evidence = (h.get("content") or "")[:120]
+            elif not best_trig and ratio > best_ratio:
+                best_ratio, best_retr = ratio, retr
         action = rule.get("action") or {}
+        name = rule.get("name") or rule.get("id") or ""
+        conf = _confidence(best_trig, best_ratio, best_retr)
         out.append({
             "id": rule.get("id"),
-            "name": rule.get("name"),
-            "triggered": triggered,
+            "name": name,
+            "triggered": best_trig,
+            "confidence": conf,
+            "confidence_detail": {"retrieval": round(best_retr, 4),
+                                  "condition_ratio": best_ratio,
+                                  "formula": "0.5×检索+0.5×条件命中" if best_trig else "0.3×条件命中"},
+            "condition_display": _render_condition(cond),
+            "evidence_narrative": _render_evidence(best_trig, evidence, name),
             "label": action.get("label") or "",
             "severity": action.get("severity") or "info",
-            "hint": (action.get("hint") or "") if triggered else "",
-            "evidence": evidence if triggered else None,
+            "intent": action.get("intent") or "",
+            "priority": action.get("priority") or "",
+            "weight": _num(action.get("weight")),
+            "hint": (action.get("hint") or "") if best_trig else "",
+            "evidence": evidence if best_trig else None,
         })
     return out
 

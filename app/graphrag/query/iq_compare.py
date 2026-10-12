@@ -77,7 +77,11 @@ def _agree(query_flat: dict, query_mod: str, top: dict) -> tuple[Optional[float]
 
 
 async def compare_iq(milvus, doc_id: str, with_charts: bool = True) -> dict:
-    """待测 IQ → WavesFM → ems_iq 近邻。任何一步失败都返回空结果 + status,不让问答崩。"""
+    """待测 IQ → WavesFM → ems_iq 近邻。任何一步失败都返回空结果 + status,不让问答崩。
+
+    with_charts=True 时额外处理 Top-1 样例的 H5,返回待测+样例双线对比图数据。
+    图表数据全部来自 process_iq_h5 真实计算,不是假数据。
+    """
     from starlette.concurrency import run_in_threadpool
 
     from ...utils.database import SessionLocal
@@ -87,7 +91,8 @@ async def compare_iq(milvus, doc_id: str, with_charts: bool = True) -> dict:
     from ...utils.minio_client import download_source
 
     out = {"status": "ok", "doc_id": doc_id, "similar_signals": [],
-           "signal_agree": None, "agree_fields": [], "iq_query": None, "iq_charts": None}
+           "signal_agree": None, "agree_fields": [], "iq_query": None,
+           "iq_charts": None, "sample_charts": None}
     try:
         if await milvus.iq_count() == 0:
             return {**out, "status": "empty_library"}
@@ -100,7 +105,7 @@ async def compare_iq(milvus, doc_id: str, with_charts: bool = True) -> dict:
         vector = await run_in_threadpool(embed_segments, result.get("iq_norm") or [])
         hits = await milvus.search_iq([float(x) for x in vector], topk=_TOPK,
                                       expr=f"iq_id != '{doc_id}'")
-    except Exception as e:  # 解析/嵌入/检索失败:降级为空表,问答照常
+    except Exception as e:
         return {**out, "status": f"failed: {e}"[:200]}
 
     rows = [_row(h) for h in hits]
@@ -112,7 +117,28 @@ async def compare_iq(milvus, doc_id: str, with_charts: bool = True) -> dict:
                        "snr_db": _f((result.get("snr") or {}).get("mean_snr"))}
     if rows:
         out["signal_agree"], out["agree_fields"] = _agree(flat, query_mod, rows[0])
+
     if with_charts:
-        charts = result.get("charts") or {}
-        out["iq_charts"] = {k: charts.get(k) for k in _CHART_KEYS if k in charts}
+        # 待测信号图表(真实计算)
+        q_charts = result.get("charts") or {}
+        out["iq_charts"] = {k: q_charts.get(k) for k in _CHART_KEYS if k in q_charts}
+
+        # Top-1 样例图表(从 MinIO 取 H5 → process_iq_h5 真实计算)
+        if rows:
+            try:
+                sample_id = rows[0].get("id")
+                async with SessionLocal() as db:
+                    sdoc = await get_document(db, UUID(sample_id))
+                if sdoc is not None:
+                    s_content = await run_in_threadpool(
+                        download_source, sdoc.kb_id, sdoc.id, sdoc.filename)
+                    s_result = await run_in_threadpool(process_iq_h5, s_content)
+                    s_charts = s_result.get("charts") or {}
+                    out["sample_charts"] = {
+                        "doc_id": sample_id,
+                        "name": rows[0].get("name") or sample_id,
+                        **{k: s_charts.get(k) for k in _CHART_KEYS if k in s_charts}
+                    }
+            except Exception:
+                out["sample_charts"] = None   # 样例处理失败不影响待测图表
     return out

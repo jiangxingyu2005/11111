@@ -166,4 +166,5 @@ async def search(query: str, milvus: AsyncMilvusClient, neo4j: Neo4jClient,
             "iq_status": iq["status"] if iq else None,
             "iq_query": iq["iq_query"] if iq else None,
             "similar_signals": iq["similar_signals"] if iq else [],
-            "iq_charts": iq["iq_charts"] if iq else None}
+            "iq_charts": iq["iq_charts"] if iq else None,
+            "sample_charts": iq["sample_charts"] if iq else None}

@@ -49,7 +49,8 @@ Content-Type: application/json
 | `iq_status` | `ok` / `empty_library` / `doc_not_found` / `failed: …`；非 ok 时表为空，问答照常 |
 | `iq_query` | 待测信号概要：文件名、调制、主频 Hz、SNR |
 | `similar_signals` | 相似信号表（最多 4 行，按相似度降序）；不带 `iq_doc_id` 时为 `[]` |
-| `iq_charts` | 待测信号的 `time_domain` / `spectrogram` / `psd` 图数据 |
+| `iq_charts` | **待测信号**的 `time_domain` / `spectrogram` / `psd` 图数据 |
+| `sample_charts` | **Top-1 样例**的同类图数据 + `doc_id` / `name`；处理失败为 `null` |
 | `intent` | `retrieval` / `graph` |
 | `cond` | NL2Query 结构化条件 |
 
@@ -57,13 +58,40 @@ Content-Type: application/json
 
 ### `rule_hits[]`
 
-| 字段 | 说明 |
-|---|---|
-| `id` `name` | 规则 ID、名称 |
-| `triggered` | 是否命中 |
-| `label` `severity` | 动作标记 / 严重度 |
-| `hint` | 仅触发时有，已注入 Prompt |
-| `evidence` | 触发用的正文摘录 |
+| 字段 | 对应前端 | 说明 |
+|---|---|---|
+| `id` `name` | R-001 频段区域关联 | 规则 ID、名称 |
+| `triggered` | 已触发 / 未触发 | 是否命中 |
+| `confidence` | 置信度 85% | **从数据算**（非静态）：触发时 `0.5×检索分 + 0.5×条件命中比例`；未触发时 `0.3×条件命中比例` |
+| `confidence_detail` | — | 算术明细 `{retrieval, condition_ratio, formula}`，前端可展开展示 |
+| `condition_display` | 条件 IF … | 优先取 `condition.display`；没有则从 DSL 自动渲染（「正文 包含 2.4GHz 且 …」） |
+| `evidence_narrative` | 证据 观测：… | 「观测：{正文摘录} → 条件满足」或「→ 规则未触发」 |
+| `intent` | 动作 意图=重点活动 | `action.intent` |
+| `priority` | 优先级=HIGH | `action.priority` |
+| `weight` | 权重 +0.85 | `action.weight` |
+| `label` `severity` | 动作标记 / 严重度 | 兼容字段 |
+| `hint` | — | 仅触发时有，已注入 Prompt |
+| `evidence` | — | 触发用的原始正文摘录 |
+
+**规则 action JSON 建议写法**（`POST /rules`）：
+
+```json
+{
+  "id": "R_001",
+  "name": "频段区域关联",
+  "condition": {
+    "display": "IF 频率在辐射源频段内 等于 true；距平台活动区域最大距离(km) 小于等于 50",
+    "all": [{"field": "content", "op": "contains", "value": "2.4GHz"}]
+  },
+  "action": {
+    "type": "mark", "label": "频段区域关联", "severity": "high",
+    "intent": "重点活动", "priority": "HIGH", "weight": 0.85, "confidence": 0.85,
+    "hint": "正文出现 2.4GHz，对照对空搜索雷达"
+  }
+}
+```
+
+`condition.display` 存前端展示的自然语言（可含现有数据算不出的条件描述）；`all/any` 存引擎实际求值用的 DSL。
 
 ### `confidence`
 
@@ -97,7 +125,7 @@ Content-Type: application/json
 | `progress` `graph_expand` | 扩展数、`facts` |
 | `progress` `rules` | `triggered` / `total` |
 | `progress` `iq_compare` | 仅带 `iq_doc_id` 时出现：`status` `similar` |
-| `results` | `hits` `graph_facts` `rule_hits` `confidence` `similar_signals` `iq_charts` `iq_query` `kb_ids` |
+| `results` | `hits` `graph_facts` `rule_hits` `confidence` `similar_signals` `iq_charts` `sample_charts` `iq_query` `kb_ids` |
 | `token` | 答案增量 |
 | `done` / `error` | 结束 / 失败 |
 
@@ -131,7 +159,21 @@ DELETE /rules/{id}
 | 引用 | `hits` | — |
 | 相似信号表 | `similar_signals` | 空数组则隐藏表格，不要用演示假数据 |
 | 相似信号一致度 | `confidence.signal_agree` | `null` 则灰 |
-| 时域 / 时频 / 频谱图 | `iq_charts` | `null` 则隐藏 |
+| 时域对比图 | `iq_charts.time_domain` + `sample_charts.time_domain` | 任一 `null` 则只画待测 |
+| 时频瀑布图 | `iq_charts.spectrogram` | `null` 则隐藏 |
+| 频谱对比图 | `iq_charts.psd` + `sample_charts.psd` | 任一 `null` 则只画待测 |
+
+### `iq_charts` / `sample_charts` 图数据结构
+
+全部来自 `process_iq_h5` 真实计算，不是假数据。
+
+| 图 | 字段 | 对应截图 |
+|---|---|---|
+| 时域对比 | `time_domain: {time[], I[], Q[]}` | 「时域对比 vs 信号-001」：`iq_charts.time_domain` 画蓝线（待测），`sample_charts.time_domain` 画绿线（样例） |
+| 时频瀑布 | `spectrogram: {freqs[], times[], power[]}` | 「时频对比（瀑布特征）」：只画 `iq_charts.spectrogram` 一张热力图 |
+| 频谱对比 | `psd: {freqs[], psd[]}` | 「频谱对比」：`iq_charts.psd` 画蓝线，`sample_charts.psd` 画绿线 |
+
+前端画双线时，两组数组长度可能不同（采样点数不同），按 `time`/`freqs` 坐标轴对齐即可。`sample_charts` 里额外有 `doc_id` 和 `name`（样例标识，显示在图标题如「vs AN/APG-68」）。
 
 ### `similar_signals[]` 每行
 

@@ -355,6 +355,7 @@ async def graph_query_stream(payload: GraphQueryRequest, db: AsyncSession = Depe
                                        "iq_query": iq["iq_query"] if iq else None,
                                        "similar_signals": iq["similar_signals"] if iq else [],
                                        "iq_charts": iq["iq_charts"] if iq else None,
+                                       "sample_charts": iq["sample_charts"] if iq else None,
                                        "kb_ids": scope})
                 contexts = build_contexts(hits)
                 gen = llm.generate_answer_stream(payload.query, contexts, graph_facts, hints)
