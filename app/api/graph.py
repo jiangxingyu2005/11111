@@ -125,6 +125,12 @@ async def graph_query(payload: GraphQueryRequest, db: AsyncSession = Depends(get
     from ..graphrag.trace.hooks import make_trace_hook
 
     relation_defs = await load_relations(db)
+    from ..utils.rules import list_rules
+    rule_rows = [
+        {"id": r.id, "name": r.name, "condition": r.condition, "action": r.action,
+         "enabled": r.enabled, "kb_id": str(r.kb_id) if r.kb_id else None, "priority": r.priority}
+        for r in await list_rules(db)
+    ]
     try:
         async with Neo4jClient() as neo4j:
             result = await query_router.search(
@@ -136,6 +142,8 @@ async def graph_query(payload: GraphQueryRequest, db: AsyncSession = Depends(get
                 relation_defs=relation_defs,
                 kb_id=payload.scope_ids(),
                 trace_hook=make_trace_hook(db),
+                rules=rule_rows,
+                iq_doc_id=payload.iq_doc_id,
             )
         await db.commit()
     except Exception as e:
@@ -200,22 +208,56 @@ async def graph_query_stream(payload: GraphQueryRequest, db: AsyncSession = Depe
 
                 expanded = []
                 graph_facts = []
+                extra_hits = []
                 if intent == "graph" and matched_ids:
                     expanded = await expand(neo4j, matched_ids, kb_id=scope)
                     id2name = {e["entity_id"]: e["name"] for e in entities}
                     graph_facts = await query_router.collect_graph_facts(
                         neo4j, matched_ids, id2name, kb_id=scope, expanded=expanded)
+                    from ..graphrag.query.recall import recall_expanded
+                    extra_hits = await recall_expanded(payload.query, milvus, embeddings,
+                                                       [e["entity_id"] for e in expanded], kb_id=scope)
+                    hits = rerank(rec["a"] + extra_hits, rec["b"], matched_ids=matched_ids)
                     yield _sse("progress", {"step": "graph_expand",
                                             "expanded": len(expanded),
                                             "facts": graph_facts})
 
+                from ..utils.rules import list_rules
+                from ..graphrag.query.eval_rules import confidence_block, eval_stored_rules, rule_hints
+                rule_rows = [
+                    {"id": r.id, "name": r.name, "condition": r.condition, "action": r.action,
+                     "enabled": r.enabled, "kb_id": str(r.kb_id) if r.kb_id else None}
+                    for r in await list_rules(db)
+                ]
+                rule_hit_rows = eval_stored_rules(rule_rows, hits, kb_scope=scope)
+                hints = rule_hints(rule_hit_rows)
+                yield _sse("progress", {"step": "rules",
+                                        "triggered": sum(1 for x in rule_hit_rows if x.get("triggered")),
+                                        "total": len(rule_hit_rows)})
+
+                from ..graphrag.query.iq_compare import compare_iq, resolve_iq_doc_id
+                iq_doc = resolve_iq_doc_id(payload.query, payload.iq_doc_id)
+                iq = await compare_iq(milvus, iq_doc) if iq_doc else None
+                if iq:
+                    yield _sse("progress", {"step": "iq_compare", "status": iq["status"],
+                                            "similar": len(iq["similar_signals"])})
+                conf = confidence_block(hits, rule_hit_rows, iq["signal_agree"] if iq else None,
+                                        iq["agree_fields"] if iq else None)
+
                 yield _sse("results", {"hits": hits,
                                        "matched_entities": matched_ids,
                                        "expanded_entities": expanded,
-                                       "graph_facts": graph_facts})
-
+                                       "graph_facts": graph_facts,
+                                       "rule_hits": rule_hit_rows,
+                                       "confidence": conf,
+                                       "iq_intent": "iq_compare" if iq else "none",
+                                       "iq_status": iq["status"] if iq else None,
+                                       "iq_query": iq["iq_query"] if iq else None,
+                                       "similar_signals": iq["similar_signals"] if iq else [],
+                                       "iq_charts": iq["iq_charts"] if iq else None,
+                                       "kb_ids": scope})
                 contexts = build_contexts(hits)
-                gen = llm.generate_answer_stream(payload.query, contexts, graph_facts)
+                gen = llm.generate_answer_stream(payload.query, contexts, graph_facts, hints)
                 sentinel = object()
 
                 def _next():

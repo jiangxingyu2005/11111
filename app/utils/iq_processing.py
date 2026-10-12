@@ -757,3 +757,137 @@ def compute_wigner_ville(I: np.ndarray, Q: np.ndarray, fs: float, limit: int = 2
         "times": times.tolist(),
         "wvd": WVD_real.tolist(),
     }
+
+
+# ==================== 脉冲参数估计 ====================
+
+def estimate_pulse_params(I: np.ndarray, Q: np.ndarray, fs: float,
+                          threshold_method: str = "mad",
+                          threshold_k: float = 3.0,
+                          threshold_pct: float = 80.0,
+                          min_pulse_width_us: float = 1.0,
+                          min_pri_us: float = 10.0,
+                          min_pulses: int = 3,
+                          max_duty: float = 0.5,
+                          max_pw_cv: float = 0.5) -> dict:
+    """从 IQ 包络估计脉冲重复频率(PRF)与脉宽。
+
+    三步:包络过门限 → 检脉冲 → 量脉宽/算 PRI。
+    三道防误报:占空比过高(连续信号)、脉冲数不足、脉宽离散度太大。
+
+    参数(用户数据有偏差时调这些,不改代码):
+      threshold_method: mad(中位数+k*MAD) | percentile(百分位) | otsu(大津法)
+      threshold_k:      mad 法灵敏度,越小越敏感
+      threshold_pct:    percentile 法百分位(0-100)
+      min_pulse_width_us: 最短脉宽(μs),短于此视为噪声尖峰
+      min_pri_us:        最短 PRI(μs),短于此视为重复检测
+      min_pulses:        少于此发数不出 PRI
+      max_duty:          占空比超此值判非脉冲串
+      max_pw_cv:         脉宽变异系数超此值判非整齐脉冲串
+    """
+    env = np.sqrt(np.asarray(I, dtype=np.float64) ** 2 +
+                  np.asarray(Q, dtype=np.float64) ** 2)
+    n = len(env)
+    if n < 100:
+        return {"pri_hz": None, "pulse_width_us": None, "pulse_count": 0,
+                "duty_cycle": None, "threshold": None, "method": threshold_method}
+
+    # ---- 门限 ----
+    med = float(np.median(env))
+    mad = float(np.median(np.abs(env - med))) * 1.4826   # MAD → 标准差近似
+    if method_mad(threshold_method):
+        thr = med + threshold_k * (mad or float(np.std(env)) or 1.0)
+    elif threshold_method == "percentile":
+        thr = float(np.percentile(env, threshold_pct))
+    elif threshold_method == "otsu":
+        thr = _otsu_threshold(env)
+    else:
+        thr = med + threshold_k * (mad or float(np.std(env)) or 1.0)
+
+    above = env > thr
+    duty = float(above.mean())
+    if duty > max_duty:
+        return {"pri_hz": None, "pulse_width_us": None, "pulse_count": 0,
+                "duty_cycle": round(duty, 4), "threshold": round(thr, 6),
+                "method": threshold_method}
+
+    # ---- 找上升沿 / 下降沿 ----
+    d = np.diff(above.astype(np.int8))
+    starts = np.where(d == 1)[0] + 1
+    ends   = np.where(d == -1)[0] + 1
+    if len(starts) == 0 or len(ends) == 0:
+        return {"pri_hz": None, "pulse_width_us": None, "pulse_count": 0,
+                "duty_cycle": round(duty, 4), "threshold": round(thr, 6),
+                "method": threshold_method}
+    if ends[0] < starts[0]:          # 首个是截断脉冲,丢掉
+        ends = ends[1:]
+    npair = min(len(starts), len(ends))
+    starts, ends = starts[:npair], ends[:npair]
+
+    # ---- 脉宽 ----
+    widths_s = (ends - starts) / fs
+    min_w_s = min_pulse_width_us * 1e-6
+    valid = widths_s >= min_w_s
+    starts_v = starts[valid]
+    widths_v = widths_s[valid]
+
+    if len(starts_v) < min_pulses:
+        return {"pri_hz": None,
+                "pulse_width_us": round(float(np.median(widths_v)) * 1e6, 2) if len(widths_v) else None,
+                "pulse_count": int(valid.sum()),
+                "duty_cycle": round(duty, 4), "threshold": round(thr, 6),
+                "method": threshold_method}
+
+    # ---- PRI ----
+    pri_s = np.diff(starts_v) / fs
+    min_p_s = min_pri_us * 1e-6
+    pri_valid = pri_s[pri_s >= min_p_s]
+    if len(pri_valid) < min_pulses - 1:
+        return {"pri_hz": None,
+                "pulse_width_us": round(float(np.median(widths_v)) * 1e6, 2),
+                "pulse_count": int(valid.sum()),
+                "duty_cycle": round(duty, 4), "threshold": round(thr, 6),
+                "method": threshold_method}
+
+    # ---- 脉宽离散度 ----
+    pw_mean = float(np.mean(widths_v))
+    pw_cv = float(np.std(widths_v) / pw_mean) if pw_mean > 0 else 999.0
+    if pw_cv > max_pw_cv:
+        return {"pri_hz": None,
+                "pulse_width_us": round(float(np.median(widths_v)) * 1e6, 2),
+                "pulse_count": int(valid.sum()),
+                "duty_cycle": round(duty, 4), "threshold": round(thr, 6),
+                "method": threshold_method}
+
+    pri_hz = float(1.0 / np.median(pri_valid))
+    pw_us = float(np.median(widths_v)) * 1e6
+    return {
+        "pri_hz": round(pri_hz, 2),
+        "pulse_width_us": round(pw_us, 2),
+        "pulse_count": int(valid.sum()),
+        "duty_cycle": round(duty, 4),
+        "threshold": round(thr, 6),
+        "method": threshold_method,
+    }
+
+
+def method_mad(name: str) -> bool:
+    return name in ("mad", "median", "med", "")
+
+
+def _otsu_threshold(env: np.ndarray, bins: int = 256) -> float:
+    """大津法:最大化类间方差,自动分噪声/脉冲两级。"""
+    hist, edges = np.histogram(env, bins=bins)
+    centers = (edges[:-1] + edges[1:]) / 2
+    total = hist.sum()
+    if total == 0:
+        return float(np.mean(env))
+    w0 = np.cumsum(hist)
+    w1 = total - w0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mu0 = np.cumsum(hist * centers) / np.where(w0 > 0, w0, 1)
+        mu1 = (np.cumsum((hist * centers)[::-1])[::-1]) / np.where(w1 > 0, w1, 1)
+        between = w0 * w1 * (mu0 - mu1) ** 2
+    between[~np.isfinite(between)] = 0
+    idx = int(np.argmax(between))
+    return float(centers[idx])

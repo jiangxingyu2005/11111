@@ -43,6 +43,7 @@ def _build_scalars(result: dict, category: str) -> dict:
         except (TypeError, ValueError):
             return default
 
+    pulse = raw.get("pulse") or {}
     scalars = {
         "category": category,
         "modulation": flat.get("modulation") or raw.get("modulation") or "Unknown",
@@ -51,6 +52,8 @@ def _build_scalars(result: dict, category: str) -> dict:
         "sample_rate_hz": _f(raw.get("sample_rate_hz")),
         "symbol_rate": _f(raw.get("symbol_rate_hz")),
         "attenuation_db": _f(result.get("attenuation_db")),
+        "pri_hz": _f(pulse.get("pri_hz") or flat.get("pri_hz")),
+        "pulse_width_us": _f(pulse.get("pulse_width_us") or flat.get("pulse_width_us")),
     }
     for f in IQ_FEATURE_FIELDS:
         scalars[f] = _f(flat.get(f))

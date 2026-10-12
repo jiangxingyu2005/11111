@@ -18,6 +18,8 @@ from ..llm import LLMClient
 from ..milvus_client import AsyncMilvusClient
 from ..neo4j_client import Neo4jClient
 from .answer import generate_answer
+from .eval_rules import confidence_block, eval_stored_rules, rule_hints
+from .iq_compare import compare_iq, resolve_iq_doc_id
 from .expand import expand
 from .nl2query import nl2query
 from .recall import dual_recall, match_entities, recall_expanded
@@ -102,7 +104,9 @@ async def search(query: str, milvus: AsyncMilvusClient, neo4j: Neo4jClient,
                  llm: Optional[LLMClient] = None,
                  relation_defs: Optional[dict] = None,
                  kb_id=None,
-                 trace_hook: Optional[Callable] = None) -> dict:
+                 trace_hook: Optional[Callable] = None,
+                 rules: Optional[list] = None,
+                 iq_doc_id=None) -> dict:
     embeddings = embeddings or EmbeddingClient()
     llm = llm or LLMClient()
     relation_defs = relation_defs or {"relation_types": []}
@@ -129,7 +133,37 @@ async def search(query: str, milvus: AsyncMilvusClient, neo4j: Neo4jClient,
 
     hits = rerank(rec["a"] + extra_hits, rec["b"], matched_ids=matched_ids)
 
-    answer = await generate_answer(query, hits, llm, trace_hook, graph_facts=graph_facts)
+    rule_rows = []
+    if rules:
+        rule_rows = eval_stored_rules(rules, hits, kb_scope=kb_id)
+    hints = rule_hints(rule_rows)
+
+    # IQ 对比:只有带待测 IQ 才查 ems_iq,否则相似信号表为空
+    iq_doc = resolve_iq_doc_id(query, iq_doc_id)
+    iq = await compare_iq(milvus, iq_doc) if iq_doc else None
+    conf = confidence_block(hits, rule_rows, iq["signal_agree"] if iq else None,
+                            iq["agree_fields"] if iq else None)
+    path = [
+        {"step": 1, "name": "用户问题 / 勾选知识库"},
+        {"step": 2, "name": "向量检索", "hits": len(rec.get("a", []) + rec.get("b", []))},
+        {"step": 3, "name": "信号列表命中" if iq else "实体匹配",
+         "matched": len(iq["similar_signals"]) if iq else len(matched_ids)},
+        {"step": 4, "name": "知识库条目 / 图扩展", "facts": len(graph_facts), "expanded": len(expanded)},
+        {"step": 5, "name": "规则库匹配", "triggered": sum(1 for r in rule_rows if r.get("triggered")),
+         "total": len(rule_rows)},
+        {"step": 6, "name": "证据融合"},
+        {"step": 7, "name": "结构化报告输出"},
+    ]
+
+    answer = await generate_answer(query, hits, llm, trace_hook, graph_facts=graph_facts,
+                                   rule_hints=hints)
     return {"intent": intent, "cond": cond, "answer": answer, "hits": hits,
             "matched_entities": matched_ids, "expanded_entities": expanded,
-            "graph_facts": graph_facts, "kb_ids": kb_id if isinstance(kb_id, list) else ([str(kb_id)] if kb_id else None)}
+            "graph_facts": graph_facts,
+            "kb_ids": kb_id if isinstance(kb_id, list) else ([str(kb_id)] if kb_id else None),
+            "rule_hits": rule_rows, "confidence": conf, "path": path,
+            "iq_intent": ("iq_compare" if iq else "none"),
+            "iq_status": iq["status"] if iq else None,
+            "iq_query": iq["iq_query"] if iq else None,
+            "similar_signals": iq["similar_signals"] if iq else [],
+            "iq_charts": iq["iq_charts"] if iq else None}

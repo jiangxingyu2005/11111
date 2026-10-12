@@ -40,15 +40,17 @@ class LLMClient:
         return _mock_extract_relations(text, entities, relation_types or [])
 
     def generate_answer(self, question: str, contexts: list[dict],
-                        graph_facts: Optional[list] = None) -> str:
+                        graph_facts: Optional[list] = None,
+                        rule_hints: Optional[list] = None) -> str:
         if not contexts and not graph_facts:
             return NO_EVIDENCE_ANSWER   # 无证据不调 LLM,防止凭模型记忆作答
         if self.is_llm:
-            return self._answer_openai(question, contexts, graph_facts)
+            return self._answer_openai(question, contexts, graph_facts, rule_hints)
         return _mock_answer(question, contexts)
 
     def generate_answer_stream(self, question: str, contexts: list[dict],
-                               graph_facts: Optional[list] = None):
+                               graph_facts: Optional[list] = None,
+                               rule_hints: Optional[list] = None):
         """流式生成(SSE 用)。openai/qwen 逐 token yield;mock 整段一次返回。
 
         返回同步 generator,由调用方经 asyncio.to_thread 逐步拉取,不阻塞事件循环。
@@ -61,7 +63,7 @@ class LLMClient:
             return
         resp = self._client().chat.completions.create(
             model=self.settings["llm"]["model"],
-            messages=_answer_messages(question, contexts, graph_facts),
+            messages=_answer_messages(question, contexts, graph_facts, rule_hints),
             temperature=0.0,
             max_tokens=int(self.settings["llm"].get("max_tokens", 4096)),
             stream=True,
@@ -70,7 +72,6 @@ class LLMClient:
             delta = chunk.choices[0].delta.content if chunk.choices else None
             if delta:
                 yield delta
-
     # ---- 消歧灰区裁判(匹配器③,provider=openai/qwen 才激活)----
     def judge_same_entity(self, name_a: str, name_b: str, entity_type: str) -> bool:
         """判断两个实体名是否同一实体。mock 恒 False(灰区不并,确定性优先)。"""
@@ -172,10 +173,10 @@ class LLMClient:
         return _call_function(self._client(), self.settings["llm"], "extract_relations",
                               instruction, text, schema)["relations"]
 
-    def _answer_openai(self, question, contexts, graph_facts=None):
+    def _answer_openai(self, question, contexts, graph_facts=None, rule_hints=None):
         resp = self._client().chat.completions.create(
             model=self.settings["llm"]["model"],
-            messages=_answer_messages(question, contexts, graph_facts),
+            messages=_answer_messages(question, contexts, graph_facts, rule_hints),
             temperature=0.0,
             max_tokens=int(self.settings["llm"].get("max_tokens", 4096)),
         )
@@ -187,14 +188,19 @@ NO_EVIDENCE_ANSWER = "知识库中未检索到与该问题相关的资料，无�
 
 
 def _answer_messages(question: str, contexts: list[dict],
-                     graph_facts: Optional[list] = None) -> list[dict]:
-    """组装回答 prompt:图关系事实(若有)+ 参考子块 + 问题。非流式/流式共用。"""
-    system = ("你是电磁信号情报助手。只能依据下面给出的图谱关系事实和参考资料作答，"
-              "回答需引用来源编号；资料中没有的信息不要补充，资料不足时直接说明资料中未提及。")
+                     graph_facts: Optional[list] = None,
+                     rule_hints: Optional[list] = None) -> list[dict]:
+    """组装回答 prompt:图关系事实 + 命中规则短提示 + 参考子块。规则表全文不进 prompt。"""
+    system = ("你是电磁信号情报助手。只能依据下面给出的图谱关系事实、规则命中提示和参考资料作答，"
+              "回答需引用来源编号；资料中没有的信息不要补充，资料不足时直接说明资料中未提及。"
+              "规则命中提示是检索引擎已判定触发的标记，不要把未给出的规则当成已触发。")
     parts: list[str] = []
     if graph_facts:
         parts.append("图谱关系事实（结构化的实体-关系，可直接据以回答）：\n"
                      + "\n".join(f"- {f}" for f in graph_facts))
+    if rule_hints:
+        parts.append("规则命中提示（仅已触发，供解释，不要编造未列出的规则）：\n"
+                     + "\n".join(f"- {h}" for h in rule_hints))
     if contexts:
         ctx = "\n".join(f"[{i}] {c.get('content', '')}" for i, c in enumerate(contexts))
         parts.append(f"参考资料：\n{ctx}")
