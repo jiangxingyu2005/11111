@@ -142,7 +142,7 @@ DELETE /rules/{id}
 | `frequency_hz` | 频率 | Hz，前端换算 MHz |
 | `modulation` | 调制 | 分类器结果，可能为 `Unknown` |
 | `snr_db` | — | 信噪比 |
-| `pri_hz` / `pulse_width_us` | PRI / 脉宽 | **当前恒 `null`**，显示「—」 |
+| `pri_hz` / `pulse_width_us` | PRI / 脉宽 | 脉冲信号有值（H5 自带 `pulses` 组直读，或从 IQ 估计）；连续调制信号为 `null` 显示「—」 |
 | `source` | 来源 | 固定 `ems_iq` |
 | `score` | 相似度 | 0~1 余弦，乘 100 显示 |
 
