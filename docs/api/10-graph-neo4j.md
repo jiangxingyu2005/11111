@@ -72,9 +72,11 @@ Neo4j 不可用时这些接口返回 `502`,不影响其它接口与 parse 主链
 
 ### `POST /graph/entities` — 新建/合并实体
 
+**同步三库**：Neo4j 节点 + PG `entity_registry` + Milvus `ems_entities`（消歧/向量检索可用）。
+
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `entity_id` | string | 是 | 实体唯一 id |
+| `entity_id` | string | 否 | 不传则自动生成 `canonical_entity_id(name, entity_type)`，与入库同一套 ID |
 | `name` | string | 是 | 实体名 |
 | `entity_type` | string | 是 | 实体类型 |
 | `aliases` | string[] | 否 | 别名 |
@@ -87,7 +89,7 @@ Neo4j 不可用时这些接口返回 `502`,不影响其它接口与 parse 主链
 
 ### `DELETE /graph/entities/{entity_id}` — 删除实体
 
-`DETACH DELETE`,连带清除该实体的 BINDS 与关系边。不存在 → `404`。成功 `204`。
+`DETACH DELETE`,连带清除该实体的 BINDS 与关系边。**同步清 PG `entity_registry` + Milvus 向量**。不存在 → `404`。成功 `204`。
 
 ---
 

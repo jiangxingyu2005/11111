@@ -8,6 +8,7 @@ qingxi 服务全部 HTTP 接口,按类别拆分到本目录各文件。Base URL 
 
 > **前端对接先看 [00-frontend-quickstart.md](00-frontend-quickstart.md)**:串起「建库 → 上传解析 → 流式提问 → 溯源」的端到端流程。
 > 多库勾选提问见仓库根目录 [多知识库勾选检索接口文档.md](../多知识库勾选检索接口文档.md)。
+> RAG 问答报告页见仓库根目录 [RAG问答接口文档.md](../RAG问答接口文档.md)。
 
 | 类别 | 文件 |
 |---|---|
@@ -23,6 +24,7 @@ qingxi 服务全部 HTTP 接口,按类别拆分到本目录各文件。Base URL 
 | 图质量与消歧 | [08-graph-metrics-resolve.md](08-graph-metrics-resolve.md) |
 | IQ 检索库 | [09-iq.md](09-iq.md) |
 | Neo4j 图查询/管理 | [10-graph-neo4j.md](10-graph-neo4j.md) |
+| Neo4j 增删同步 | [11-neo4j-crud-sync.md](11-neo4j-crud-sync.md) |
 | 预设推理规则 | [10-rules.md](10-rules.md) |
 
 ## 端点总览

@@ -247,6 +247,7 @@ class GraphQueryRequest(BaseModel):
     query: str
     kb_id: Optional[UUID] = None
     kb_ids: Optional[list[UUID]] = None
+    iq_doc_id: Optional[UUID] = None   # 待测 IQ 文档,有则查 ems_iq 出相似信号表;无则为空
 
     def scope_ids(self) -> list[str] | None:
         ids: list[str] = []

@@ -77,6 +77,16 @@ class Settings(BaseSettings):
     iq_collection: str = "ems_iq"
     iq_dim: int = 256
 
+    # 脉冲参数估计(用户数据有偏差时只调这些,不改代码)
+    iq_pulse_threshold_method: str = "mad"   # mad | percentile | otsu
+    iq_pulse_threshold_k: float = 3.0        # mad 法:门限 = 中位数 + k*MAD
+    iq_pulse_threshold_pct: float = 80.0     # percentile 法:包络百分位
+    iq_pulse_min_width_us: float = 1.0       # 最短脉宽(μs),短于此视为噪声尖峰
+    iq_pulse_min_pri_us: float = 10.0        # 最短 PRI(μs),短于此视为重复检测
+    iq_pulse_min_count: int = 3              # 少于此发数不出 PRI
+    iq_pulse_max_duty: float = 0.5           # 占空比超此值判非脉冲串(连续信号)
+    iq_pulse_max_pw_cv: float = 0.5          # 脉宽变异系数超此值判非整齐脉冲串
+
     # 清洗(页眉/页脚判定参数)
     clean_header_threshold: int = 3    # 短文本重复多少次判为页眉/页脚
     clean_header_max_len: int = 60     # 页眉/页脚候选文本的最大长度

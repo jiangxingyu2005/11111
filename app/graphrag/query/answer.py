@@ -19,11 +19,12 @@ def build_contexts(hits: list[dict]) -> list[dict]:
 async def generate_answer(question: str, hits: list[dict],
                           llm: Optional[LLMClient] = None,
                           trace_hook: Optional[Callable] = None,
-                          graph_facts: Optional[list[str]] = None) -> str:
+                          graph_facts: Optional[list[str]] = None,
+                          rule_hints: Optional[list[str]] = None) -> str:
     llm = llm or LLMClient()
     contexts = build_contexts(hits)
     # openai 走网络,mock 纯计算;统一经线程池,不阻塞事件循环
-    answer = await asyncio.to_thread(llm.generate_answer, question, contexts, graph_facts)
+    answer = await asyncio.to_thread(llm.generate_answer, question, contexts, graph_facts, rule_hints)
     if trace_hook:
         await trace_hook(question, hits, answer)
     return answer

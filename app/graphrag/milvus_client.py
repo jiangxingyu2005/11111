@@ -45,6 +45,8 @@ IQ_SNR = "snr"
 IQ_SAMPLE_RATE = "sample_rate_hz"
 IQ_SYMBOL_RATE = "symbol_rate"
 IQ_ATTENUATION_DB = "attenuation_db"
+IQ_PRI_HZ = "pri_hz"
+IQ_PULSE_WIDTH_US = "pulse_width_us"
 IQ_EMBEDDING = "embedding"
 
 # 26 特征里的 24 个数值特征(与 iq._flatten_features 字段一一对应)
@@ -63,6 +65,7 @@ IQ_FEATURE_FIELDS = [
 IQ_FIELD_NAMES = [
     IQ_ID, IQ_CATEGORY, IQ_MODULATION, IQ_MOD_ID,
     IQ_SNR, IQ_SAMPLE_RATE, IQ_SYMBOL_RATE, IQ_ATTENUATION_DB,
+    IQ_PRI_HZ, IQ_PULSE_WIDTH_US,
     *IQ_FEATURE_FIELDS, IQ_EMBEDDING,
 ]
 
@@ -250,7 +253,12 @@ class MilvusClient:
         from pymilvus import Collection, CollectionSchema, DataType, FieldSchema, utility
         name = self.iq_collection_name
         if utility.has_collection(name, using="default"):
-            return
+            # 检查是否缺新字段(pri_hz / pulse_width_us),缺则重建
+            coll = Collection(name=name, using="default")
+            existing = {f.name for f in coll.schema.fields}
+            if IQ_PRI_HZ in existing and IQ_PULSE_WIDTH_US in existing:
+                return
+            coll.drop()
         dim = self.iq_dim
         fields = [
             FieldSchema(name=IQ_ID, dtype=DataType.VARCHAR, is_primary=True, max_length=64),
@@ -261,11 +269,13 @@ class MilvusClient:
             FieldSchema(name=IQ_SAMPLE_RATE, dtype=DataType.FLOAT),
             FieldSchema(name=IQ_SYMBOL_RATE, dtype=DataType.FLOAT),
             FieldSchema(name=IQ_ATTENUATION_DB, dtype=DataType.FLOAT),
+            FieldSchema(name=IQ_PRI_HZ, dtype=DataType.FLOAT),
+            FieldSchema(name=IQ_PULSE_WIDTH_US, dtype=DataType.FLOAT),
         ]
         for fname in IQ_FEATURE_FIELDS:
             fields.append(FieldSchema(name=fname, dtype=DataType.FLOAT))
         fields.append(FieldSchema(name=IQ_EMBEDDING, dtype=DataType.FLOAT_VECTOR, dim=dim))
-        schema = CollectionSchema(fields, description="IQ 信号 256 维嵌入检索库(类别 + 26 特征标量)")
+        schema = CollectionSchema(fields, description="IQ 信号 256 维嵌入检索库(类别 + 脉冲参数 + 26 特征标量)")
         coll = Collection(name=name, schema=schema, using="default")
         coll.create_index(IQ_EMBEDDING, {"metric_type": "COSINE", "index_type": "IVF_FLAT",
                                          "params": {"nlist": 128}})

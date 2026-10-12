@@ -19,7 +19,7 @@ from .iq_processing import (
     compute_constellation, compute_eyediagram, compute_envelope,
     compute_phase, compute_instantaneous_frequency, compute_psd,
     compute_cepstrum, compute_stft, compute_wigner_ville,
-    clean_by_snr, extract_all_features,
+    clean_by_snr, extract_all_features, estimate_pulse_params,
 )
 from .iq_buquan import buquan_iq_both
 from .iq_predict import predict_weighted
@@ -50,20 +50,27 @@ def _open_h5(content: bytes):
 def validate_iq_h5(content: bytes) -> None:
     """输入 H5 完整性校验:不过抛清晰 ValueError,不让损坏/不完整文件进解析管道。
 
-    挡住空文件 / 非 H5 / 缺 signal/iq / 形状不是 (2, N) 或 N 不足 / 缺采样率 /
+    挡住空文件 / 非 H5 / 缺 IQ 数据(signal/iq 或 iq)/ 形状不对 / 缺采样率 /
     采样率不大于目标采样率(后者正是 fir_filter 在 cutoff>=fs/2 崩掉的那条)。
     """
     if not content:
         raise ValueError("IQ 文件为空,无法解析")
     try:
         with _open_h5(content) as f:
-            if "signal/iq" not in f:
-                raise ValueError("缺少 signal/iq 数据集,不是有效的 IQ H5 文件")
-            ds = f["signal/iq"]
-            if ds.ndim != 2 or ds.shape[0] != 2 or ds.shape[1] < settings.iq_segment_len:
-                raise ValueError(
-                    f"IQ 双通道数据不完整:形状 {ds.shape},需 (2, >= {settings.iq_segment_len})"
-                )
+            if "signal" in f and "iq" in f["signal"]:
+                ds = f["signal/iq"]
+                if ds.ndim != 2 or ds.shape[0] != 2 or ds.shape[1] < settings.iq_segment_len:
+                    raise ValueError(
+                        f"IQ 双通道数据不完整:形状 {ds.shape},需 (2, >= {settings.iq_segment_len})"
+                    )
+            elif "iq" in f:
+                ds = f["iq"]
+                if ds.ndim != 1 or ds.shape[0] < settings.iq_segment_len:
+                    raise ValueError(
+                        f"IQ 复数数据不完整:形状 {ds.shape},需 (>= {settings.iq_segment_len})"
+                    )
+            else:
+                raise ValueError("缺少 IQ 数据(signal/iq 或 iq),不是有效的 IQ H5 文件")
             if "sample_rate_hz" not in f.attrs:
                 raise ValueError("缺少采样率属性 sample_rate_hz")
             fs = float(f.attrs["sample_rate_hz"])
@@ -78,13 +85,50 @@ def validate_iq_h5(content: bytes) -> None:
 
 
 def _read_h5(content: bytes):
-    """读 H5 的 signal/iq(I/Q 两通道)与采样率/符号率。"""
+    """读 H5 的 IQ 数据、采样率、符号率、脉冲参数。
+
+    兼容两种格式:
+      老格式: f["signal/iq"]  shape(2,N) I/Q 两行
+      新格式: f["iq"]         shape(N,)  complex64
+    脉冲参数:有 f["pulses"] 组则直接读 pri_s / pulse_width_s;
+             没有则返回空,由 estimate_pulse_params 从 IQ 估计。
+    """
     with _open_h5(content) as f:
-        I = np.asarray(f["signal/iq"][0, :], dtype=np.float64).copy()
-        Q = np.asarray(f["signal/iq"][1, :], dtype=np.float64).copy()
+        # ---- IQ 数据 ----
+        if "signal" in f and "iq" in f["signal"]:
+            iq_arr = np.asarray(f["signal/iq"], dtype=np.float64)
+            I = iq_arr[0, :].copy()
+            Q = iq_arr[1, :].copy()
+        elif "iq" in f:
+            iq_c = np.asarray(f["iq"])
+            if np.iscomplexobj(iq_c):
+                I = np.asarray(iq_c.real, dtype=np.float64).copy()
+                Q = np.asarray(iq_c.imag, dtype=np.float64).copy()
+            else:
+                I = np.asarray(iq_c, dtype=np.float64).copy()
+                Q = np.zeros_like(I)
+        else:
+            raise ValueError("H5 中未找到 IQ 数据(signal/iq 或 iq)")
+
         fs = float(f.attrs["sample_rate_hz"])
         symbol_rate = float(f.attrs.get("symbol_rate_hz", 1e6))
-    return I, Q, fs, symbol_rate
+
+        # ---- 脉冲参数(直接读,不估计) ----
+        pulse_params: dict = {}
+        if "pulses" in f and isinstance(f["pulses"], h5py.Group):
+            pg = f["pulses"]
+            if "pri_s" in pg and "pulse_width_s" in pg:
+                pri_arr = np.asarray(pg["pri_s"][:], dtype=np.float64)
+                pw_arr = np.asarray(pg["pulse_width_s"][:], dtype=np.float64)
+                pri_ok = pri_arr[pri_arr > 0]
+                pw_ok = pw_arr[pw_arr > 0]
+                pulse_params = {
+                    "pri_hz": round(float(1.0 / np.median(pri_ok)), 2) if len(pri_ok) else None,
+                    "pulse_width_us": round(float(np.median(pw_ok)) * 1e6, 2) if len(pw_ok) else None,
+                    "pulse_count": int(len(pri_arr)),
+                    "source": "h5_pulses",
+                }
+    return I, Q, fs, symbol_rate, pulse_params
 
 
 def _load_name_to_id():
@@ -168,7 +212,7 @@ def process_iq_h5(content: bytes, snr_threshold_db: float | None = None) -> dict
     snr_threshold_db: SNR 清洗阈值(dB);None 回退全局默认 settings.iq_snr_threshold_db。
     """
     validate_iq_h5(content)
-    I, Q, fs, symbol_rate = _read_h5(content)
+    I, Q, fs, symbol_rate, h5_pulse_params = _read_h5(content)
     segment_len = settings.iq_segment_len
     if snr_threshold_db is None:
         snr_threshold_db = settings.iq_snr_threshold_db
@@ -247,6 +291,24 @@ def process_iq_h5(content: bytes, snr_threshold_db: float | None = None) -> dict
 
     # 8. 平铺 26 特征 -> 中文描述(作为 md 正文)
     flat = _flatten_features(features, predicted_class, mod_id)
+    # 8.5 脉冲参数:H5 有 pulses 组直接读,否则从 IQ 估计
+    if h5_pulse_params and h5_pulse_params.get("pri_hz") is not None:
+        pulse_params = h5_pulse_params
+    else:
+        pulse_params = estimate_pulse_params(
+            I_norm, Q_norm, target_fs,
+            threshold_method=settings.iq_pulse_threshold_method,
+            threshold_k=settings.iq_pulse_threshold_k,
+            threshold_pct=settings.iq_pulse_threshold_pct,
+            min_pulse_width_us=settings.iq_pulse_min_width_us,
+            min_pri_us=settings.iq_pulse_min_pri_us,
+            min_pulses=settings.iq_pulse_min_count,
+            max_duty=settings.iq_pulse_max_duty,
+            max_pw_cv=settings.iq_pulse_max_pw_cv,
+        )
+    flat["pri_hz"] = pulse_params.get("pri_hz")
+    flat["pulse_width_us"] = pulse_params.get("pulse_width_us")
+    flat["pulse_count"] = pulse_params.get("pulse_count", 0)
     md = describe_signal_features(flat)
 
     # 9. 5 组 IQ 片段(新增 iq_norm:归一化后片段,供 IQ 嵌入用)
@@ -267,6 +329,7 @@ def process_iq_h5(content: bytes, snr_threshold_db: float | None = None) -> dict
         "mod_id": mod_id,
         "attenuation_db": attenuation_db,
         "snr": snr_data,
+        "pulse": pulse_params,
     }
 
     return {
