@@ -405,6 +405,8 @@ async def parse_audio(
             results.append(
                 await _finalize(kb_id, filename, content, text, raw_entry, None, "asr", return_content)
             )
+        except ValueError as e:  # 完整性校验不过,清晰文案直返
+            results.append(FileResult(filename=filename, success=False, error=str(e)))
         except Exception as e:  # 兜底:任何异常都不让整个请求崩溃
             results.append(FileResult(filename=filename, success=False, error=f"处理失败: {e}"))
 
@@ -438,6 +440,8 @@ async def parse_video(
                 await _finalize(kb_id, filename, content, raw_md, raw_entry, page_count, engine, return_content)
             )
         except MinerUError as e:
+            results.append(FileResult(filename=filename, success=False, error=str(e)))
+        except ValueError as e:  # 完整性校验不过,清晰文案直返
             results.append(FileResult(filename=filename, success=False, error=str(e)))
         except Exception as e:  # 兜底:任何异常都不让整个请求崩溃
             results.append(FileResult(filename=filename, success=False, error=f"处理失败: {e}"))
@@ -522,6 +526,8 @@ async def parse_iq(
                 "iq_meta": iq["iq_meta"],
             }
             results.append(IqResult(**fr.model_dump(), **extra))
+        except ValueError as e:  # 完整性校验不过,清晰文案直返
+            results.append(IqResult(filename=filename, success=False, error=str(e)))
         except Exception as e:  # 兜底:任何异常都不让整个请求崩溃
             results.append(IqResult(filename=filename, success=False, error=f"处理失败: {e}"))
 

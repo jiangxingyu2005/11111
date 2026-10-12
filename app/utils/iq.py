@@ -7,6 +7,7 @@ import json
 import math
 import os
 import tempfile
+from contextlib import contextmanager
 
 import h5py
 import numpy as np
@@ -29,20 +30,60 @@ from .iq_tool import describe_signal_features
 _name_to_id = None
 
 
-def _read_h5(content: bytes):
-    """读 H5 的 signal/iq(I/Q 两通道)与采样率/符号率。"""
+@contextmanager
+def _open_h5(content: bytes):
+    """字节 -> 临时 .h5 文件 -> 打开的 h5py 句柄(离开上下文自动关闭并清理临时文件)。"""
     tmp = tempfile.NamedTemporaryFile(suffix=".h5", delete=False)
     try:
         tmp.write(content)
         tmp.flush()
         tmp.close()
-        with h5py.File(tmp.name, "r") as f:
-            I = np.asarray(f["signal/iq"][0, :], dtype=np.float64).copy()
-            Q = np.asarray(f["signal/iq"][1, :], dtype=np.float64).copy()
-            fs = float(f.attrs["sample_rate_hz"])
-            symbol_rate = float(f.attrs.get("symbol_rate_hz", 1e6))
+        f = h5py.File(tmp.name, "r")
+        try:
+            yield f
+        finally:
+            f.close()
     finally:
         os.unlink(tmp.name)
+
+
+def validate_iq_h5(content: bytes) -> None:
+    """输入 H5 完整性校验:不过抛清晰 ValueError,不让损坏/不完整文件进解析管道。
+
+    挡住空文件 / 非 H5 / 缺 signal/iq / 形状不是 (2, N) 或 N 不足 / 缺采样率 /
+    采样率不大于目标采样率(后者正是 fir_filter 在 cutoff>=fs/2 崩掉的那条)。
+    """
+    if not content:
+        raise ValueError("IQ 文件为空,无法解析")
+    try:
+        with _open_h5(content) as f:
+            if "signal/iq" not in f:
+                raise ValueError("缺少 signal/iq 数据集,不是有效的 IQ H5 文件")
+            ds = f["signal/iq"]
+            if ds.ndim != 2 or ds.shape[0] != 2 or ds.shape[1] < settings.iq_segment_len:
+                raise ValueError(
+                    f"IQ 双通道数据不完整:形状 {ds.shape},需 (2, >= {settings.iq_segment_len})"
+                )
+            if "sample_rate_hz" not in f.attrs:
+                raise ValueError("缺少采样率属性 sample_rate_hz")
+            fs = float(f.attrs["sample_rate_hz"])
+            if not math.isfinite(fs) or fs <= 0:
+                raise ValueError(f"采样率无效: {fs}")
+            if fs <= settings.iq_target_fs:
+                raise ValueError(f"采样率 {fs} Hz 须大于目标采样率 {settings.iq_target_fs} Hz")
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError("不是有效的 H5 文件") from e
+
+
+def _read_h5(content: bytes):
+    """读 H5 的 signal/iq(I/Q 两通道)与采样率/符号率。"""
+    with _open_h5(content) as f:
+        I = np.asarray(f["signal/iq"][0, :], dtype=np.float64).copy()
+        Q = np.asarray(f["signal/iq"][1, :], dtype=np.float64).copy()
+        fs = float(f.attrs["sample_rate_hz"])
+        symbol_rate = float(f.attrs.get("symbol_rate_hz", 1e6))
     return I, Q, fs, symbol_rate
 
 
@@ -123,6 +164,7 @@ def _clean_param_result(param_result):
 
 def process_iq_h5(content: bytes) -> dict:
     """处理 H5 IQ 信号,返回全部中间结果(供 API 层组装响应与 md 入库)。"""
+    validate_iq_h5(content)
     I, Q, fs, symbol_rate = _read_h5(content)
     segment_len = settings.iq_segment_len
     snr_threshold_db = settings.iq_snr_threshold_db

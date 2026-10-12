@@ -10,11 +10,38 @@ import numpy as np
 from ..config import settings
 
 
+def validate_video(content: bytes, filename: str) -> None:
+    """视频完整性校验:不过抛清晰 ValueError,不让损坏/不完整文件进抽帧管道。
+
+    只保证「打得开、有帧、能解析」:空文件 / 无法解码 / 读不到第一帧均拒收。
+    帧率不硬判(fps 元数据缺失时抽帧已有 25fps 兜底,不算文件不完整)。
+    """
+    if not content:
+        raise ValueError("视频文件为空,无法解析")
+    suffix = Path(filename).suffix or ".mp4"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+        f.write(content)
+        tmp_path = f.name
+    try:
+        cap = cv2.VideoCapture(tmp_path)
+        if not cap.isOpened():
+            raise ValueError("视频无法解码,可能已损坏或不是视频")
+        try:
+            ret, _ = cap.read()
+            if not ret:
+                raise ValueError("视频无有效帧")
+        finally:
+            cap.release()
+    finally:
+        os.unlink(tmp_path)
+
+
 def extract_frames(content: bytes, filename: str) -> list[bytes]:
     """从视频字节抽取帧(每秒 settings.video_frame_rate 帧),返回 jpg 字节列表。
 
     opencv 的 VideoCapture 只能读文件路径,先把字节写到临时文件,抽完删除。
     """
+    validate_video(content, filename)
     suffix = Path(filename).suffix or ".mp4"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
         f.write(content)
