@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 from datetime import datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -491,6 +492,7 @@ async def parse_iq(
     files: list[UploadFile] = File(...),
     kb_id: UUID = Form(..., description="所属知识库 id"),
     return_content: bool = Query(True, description="是否在响应里返回清洗后的 markdown 正文"),
+    snr_threshold_db: float | None = Form(None, description="可选:按次覆盖 SNR 清洗阈值(dB),不传用全局默认"),
 ) -> IqParseResponse:
     """IQ 信号解析:H5 -> SNR 清洗 -> IQ 补全 -> 信号处理 -> 26 特征中文描述入库(不落中间 IQ 数据)。"""
     await _require_kb(kb_id)
@@ -507,8 +509,12 @@ async def parse_iq(
             )
             continue
 
+        if snr_threshold_db is not None and not math.isfinite(snr_threshold_db):
+            results.append(IqResult(filename=filename, success=False, error="snr_threshold_db 必须是有限数值"))
+            continue
+
         try:
-            iq = await run_in_threadpool(process_iq_h5, content)
+            iq = await run_in_threadpool(process_iq_h5, content, snr_threshold_db)
             fr = await _finalize(
                 kb_id, filename, content, iq["md"], iq["raw_entry"], None, "iq", return_content
             )

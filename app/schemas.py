@@ -59,9 +59,13 @@ class IqParseResponse(BaseModel):
 
 
 class IqIngestRequest(BaseModel):
-    """IQ 入库打标请求:文档 uuid + 人工类别标签(雷达型号/类型)。"""
+    """IQ 入库打标请求:文档 uuid + 人工类别标签(雷达型号/类型)。
+
+    snr_threshold_db: 可选,按次覆盖 SNR 清洗阈值(dB);不传用全局默认。
+    """
     doc_id: UUID
     category: str
+    snr_threshold_db: Optional[float] = None
 
 
 class IqIngestResponse(BaseModel):

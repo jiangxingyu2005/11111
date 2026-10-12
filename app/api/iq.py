@@ -151,9 +151,14 @@ async def ingest_iq(payload: IqIngestRequest) -> IqIngestResponse:
 
     doc, content = await _load_doc_h5(doc_id)
 
+    if payload.snr_threshold_db is not None and not math.isfinite(payload.snr_threshold_db):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="snr_threshold_db 必须是有限数值"
+        )
+
     # 1. 重跑 IQ 管道一次,同时拿到归一化片段(嵌入)+ 26 特征/md(标量 + 图谱)
     try:
-        result = await run_in_threadpool(process_iq_h5, content)
+        result = await run_in_threadpool(process_iq_h5, content, payload.snr_threshold_db)
     except ValueError as e:  # 输入 H5 完整性校验不过 -> 422 清晰文案(与 /parse-iq 同文案)
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
 

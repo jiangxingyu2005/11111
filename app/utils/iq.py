@@ -162,12 +162,16 @@ def _clean_param_result(param_result):
     return clean
 
 
-def process_iq_h5(content: bytes) -> dict:
-    """处理 H5 IQ 信号,返回全部中间结果(供 API 层组装响应与 md 入库)。"""
+def process_iq_h5(content: bytes, snr_threshold_db: float | None = None) -> dict:
+    """处理 H5 IQ 信号,返回全部中间结果(供 API 层组装响应与 md 入库)。
+
+    snr_threshold_db: SNR 清洗阈值(dB);None 回退全局默认 settings.iq_snr_threshold_db。
+    """
     validate_iq_h5(content)
     I, Q, fs, symbol_rate = _read_h5(content)
     segment_len = settings.iq_segment_len
-    snr_threshold_db = settings.iq_snr_threshold_db
+    if snr_threshold_db is None:
+        snr_threshold_db = settings.iq_snr_threshold_db
     target_fs = settings.iq_target_fs
 
     if min(len(I), len(Q)) < segment_len:
